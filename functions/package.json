@@ -1,0 +1,33 @@
+{
+  "name": "inventory-cloud-functions",
+  "version": "1.0.0",
+  "description": "Optional Firebase Cloud Functions for inventory management notifications",
+  "main": "index.js",
+  "engines": {
+    "node": "18"
+  },
+  "scripts": {
+    "serve": "firebase emulators:start --only functions",
+    "shell": "firebase functions:shell",
+    "start": "npm run shell",
+    "deploy": "firebase deploy --only functions",
+    "logs": "firebase functions:log"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.0.0",
+    "firebase-functions": "^4.8.1"
+  },
+  "devDependencies": {
+    "firebase-functions-test": "^3.1.0"
+  },
+  "private": true,
+  "keywords": [
+    "firebase",
+    "cloud-functions",
+    "inventory",
+    "notifications",
+    "firestore"
+  ],
+  "author": "Inventory Management System",
+  "license": "MIT"
+}

@@ -1,0 +1,7 @@
+{
+  "name": "StockFlow Dashboard",
+  "description": "A modern, AI-powered inventory management dashboard to track stock levels, visualize data, and get smart restocking suggestions. Features include barcode scanning and interactive charts.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}

@@ -1,0 +1,111 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    
+    "signals": {
+      "$userId": {
+        ".read": "$userId === auth.uid",
+        ".write": "$userId === auth.uid",
+        ".validate": "newData.hasChildren(['lastEventAt']) && newData.child('lastEventAt').isNumber()"
+      }
+    },
+    
+    "organizations": {
+      "$orgId": {
+        ".read": "auth != null",
+        ".write": "auth != null",
+        
+        "stockTakeSessions": {
+          "$sessionId": {
+            ".read": "auth != null",
+            ".write": "auth != null"
+          }
+        },
+
+        "members": {
+          "$userId": {
+            ".read": "auth != null",
+            ".write": "auth != null"
+          }
+        },
+
+        "notifications": {
+          "$userId": {
+            ".read": "auth != null",
+            ".write": "auth != null"
+          }
+        }
+      }
+    },
+    
+    "stockTakeSessions": {
+      "$orgId": {
+        "$sessionId": {
+          ".read": "auth != null",
+          ".write": "auth != null"
+        }
+      }
+    },
+    
+    "activeStockTakeDevices": {
+      "$orgId": {
+        ".read": "auth != null",
+        "$deviceId": {
+          ".read": "auth != null",
+          ".write": "auth != null"
+        }
+      }
+    },
+    
+    "stockTakeApprovals": {
+      "$orgId": {
+        ".read": "auth != null",
+        "$approvalId": {
+          ".read": "auth != null",
+          ".write": "auth != null"
+        }
+      }
+    },
+
+    "zoho_tokens": {
+      "$orgId": {
+        ".read": "auth != null",
+        ".write": "auth != null"
+      }
+    },
+
+    "realtime": {
+      "activities": {
+        "$orgId": {
+          ".read": "auth != null",
+          ".write": "auth != null"
+        }
+      },
+      "presence": {
+        "$orgId": {
+          ".read": "auth != null",
+          ".write": "auth != null"
+        }
+      },
+      "notifications": {
+        "$orgId": {
+          ".read": "auth != null",
+          ".write": "auth != null"
+        }
+      },
+      "counters": {
+        "$orgId": {
+          ".read": "auth != null",
+          ".write": "auth != null"
+        }
+      },
+      "sessions": {
+        "$orgId": {
+          ".read": "auth != null",
+          ".write": "auth != null"
+        }
+      }
+    }
+  }
+}

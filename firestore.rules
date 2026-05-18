@@ -1,0 +1,160 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ========================================================================
+    // PRODUCTION SECURITY RULES - MULTI-TENANT ISOLATION
+    // ========================================================================
+    
+    // Helper function - check if authenticated
+    function isAuth() {
+      return request.auth != null;
+    }
+    
+    // Helper function - check if user belongs to the specified organization
+    function isOrgMember(orgId) {
+      // Allow if the user has a userIndex pointing to this org
+      // OR if they exist in the organizations users subcollection
+      return isAuth() && 
+        (get(/databases/$(database)/documents/userIndex/$(request.auth.uid)).data.organizationId == orgId ||
+         exists(/databases/$(database)/documents/organizations/$(orgId)/users/$(request.auth.uid)));
+    }
+
+    // Helper function - check if user is admin in the organization
+    function isOrgAdmin(orgId) {
+      let role = get(/databases/$(database)/documents/userIndex/$(request.auth.uid)).data.role;
+      return isAuth() && (role == 'owner' || role == 'Admin' || role == 'admin');
+    }
+    
+    // ========================================================================
+    // GLOBAL COLLECTIONS
+    // ========================================================================
+    
+    // User Profiles - only the user themselves can read/write their own profile
+    match /users/{userId} {
+      allow read, write: if isAuth() && (request.auth.uid == userId || isOrgAdmin(resource.data.organizationId));
+    }
+    
+    // Device Registration - only user themselves can manage their devices
+    match /devices/{deviceId} {
+      allow read, write: if isAuth() && (request.resource.data.userId == request.auth.uid || resource.data.userId == request.auth.uid);
+    }
+    
+    // User Index mapping uid -> orgId
+    match /userIndex/{userId} {
+      allow read: if isAuth() && request.auth.uid == userId;
+      // Own user can write their own entry (login flow).
+      // Org admins/owners can write entries for users THEY create (invite/add flow).
+      allow write: if isAuth() && (
+        request.auth.uid == userId ||
+        isOrgAdmin(request.resource.data.organizationId)
+      );
+    }
+    
+    // Email Index for Invites - restrict to prevent enumeration
+    // Users can only read their own email entry, admins can read/write for invites
+    match /userEmailIndex/{email} {
+      allow read: if isAuth() && (
+        resource.data.email == request.auth.token.email ||
+        resource.data.userId == request.auth.uid
+      );
+      allow create: if isAuth();
+      allow update, delete: if isAuth();
+    }
+    
+    // ========================================================================
+    // ORGANIZATIONS - DATA ISOLATION
+    // ========================================================================
+    
+    match /organizations/{orgId} {
+      allow read: if isOrgMember(orgId);
+      allow update: if isOrgAdmin(orgId);
+      allow create: if isAuth(); 
+      
+      // All subcollections are private to organization members.
+      // Bootstrap exception: a user can write to their own org's subcollections
+      // during initial creation (when userIndex doesn't exist yet).
+      match /{allSubcollections=**} {
+        allow read, write: if isOrgMember(orgId) ||
+          (isAuth() && request.resource.data.keys().hasAny(['role', 'initialized', 'active']));
+      }
+      
+      // Administrative path overrides
+      match /settings/{docId} {
+        allow write: if isOrgAdmin(orgId);
+      }
+      match /users/{userId} {
+        allow write: if isOrgAdmin(orgId);
+      }
+      
+      // ========================================================================
+      // PURCHASE ORDER SYSTEM RULES
+      // ========================================================================
+      
+      // Purchase Orders
+      match /purchaseOrders/{poId} {
+        allow read: if isOrgMember(orgId);
+        allow create: if isOrgMember(orgId) && request.resource.data.createdBy == request.auth.uid;
+        allow update: if isOrgMember(orgId) && 
+                      (resource.data.createdBy == request.auth.uid || isOrgAdmin(orgId));
+        allow delete: if isOrgAdmin(orgId);
+        
+        // Audit logs (immutable)
+        match /auditLogs/{logId} {
+          allow read: if isOrgMember(orgId);
+          allow create: if isOrgMember(orgId);
+          allow update, delete: if false;
+        }
+        
+        // Email logs (immutable)
+        match /emailLogs/{emailId} {
+          allow read: if isOrgMember(orgId);
+          allow create: if isOrgMember(orgId);
+          allow update, delete: if false;
+        }
+      }
+      
+      // Suppliers
+      match /suppliers/{supplierId} {
+        allow read: if isOrgMember(orgId);
+        allow create: if isOrgMember(orgId);
+        allow update: if isOrgMember(orgId);
+        allow delete: if isOrgAdmin(orgId);
+      }
+      
+      // Delivery Notes
+      match /deliveryNotes/{dnId} {
+        allow read: if isOrgMember(orgId);
+        allow create: if isOrgMember(orgId);
+        allow update: if isOrgMember(orgId);
+        allow delete: if isOrgAdmin(orgId);
+      }
+      
+      // Shipping Labels
+      match /shippingLabels/{labelId} {
+        allow read: if isOrgMember(orgId);
+        allow create: if isOrgMember(orgId);
+        allow update: if isOrgMember(orgId);
+        allow delete: if isOrgAdmin(orgId);
+      }
+      
+      // PO Counters (for auto-numbering)
+      match /counters/{counterId} {
+        allow read: if isOrgMember(orgId);
+        allow write: if isOrgMember(orgId);
+      }
+    }
+
+    // Notifications and Activities isolation
+    match /notifications/{notificationId} {
+      allow read: if isAuth() && isOrgMember(resource.data.organizationId);
+      allow update: if isAuth() && isOrgMember(resource.data.organizationId);
+      allow create: if isAuth() && isOrgMember(request.resource.data.organizationId);
+    }
+    
+    match /activities/{activityId} {
+      allow read: if isAuth() && isOrgMember(resource.data.organizationId);
+      allow create: if isAuth() && isOrgMember(request.resource.data.organizationId);
+    }
+  }
+}

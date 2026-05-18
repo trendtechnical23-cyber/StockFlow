@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Cross-Origin-Opener-Policy" content="same-origin-allow-popups" />
+    <meta http-equiv="Cross-Origin-Embedder-Policy" content="unsafe-none" />
+    <title>StockFlow Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      // Configure Tailwind to use class-based dark mode
+      tailwind.config = {
+        darkMode: 'class'
+      };
+      
+      // Apply theme immediately before React loads to prevent flickering
+      // This is a simple version - AppContext will handle the full initialization
+      (function() {
+        try {
+          // We can't know the exact org ID here easily without logic, 
+          // but we can look for any appSettings_* key or just default to dark
+          const keys = Object.keys(localStorage);
+          const settingsKey = keys.find(k => k.startsWith('appSettings_'));
+          if (settingsKey) {
+            const settings = JSON.parse(localStorage.getItem(settingsKey));
+            if (settings && settings.theme) {
+              document.documentElement.classList.add(settings.theme);
+              if (settings.theme === 'dark') {
+                document.body.classList.add('bg-gray-900');
+              }
+            }
+          } else {
+            // Default to dark if no settings found
+            document.documentElement.classList.add('dark');
+          }
+        } catch (e) {}
+      })();
+    </script>
+  <script type="importmap">
+{
+  "imports": {
+    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.20.0",
+    "react/": "https://aistudiocdn.com/react@^19.1.1/",
+    "react": "https://aistudiocdn.com/react@^19.1.1",
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.1.1/",
+    "recharts": "https://aistudiocdn.com/recharts@^3.2.1",
+    "html5-qrcode": "https://aistudiocdn.com/html5-qrcode@^2.3.8",
+    "firebase/app": "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js",
+    "firebase/auth": "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js",
+    "firebase/firestore": "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js",
+    "firebase/storage": "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js",
+    "firebase/analytics": "https://www.gstatic.com/firebasejs/10.12.2/firebase-analytics.js",
+    "firebase/": "https://aistudiocdn.com/firebase@^12.3.0/"
+  }
+}
+</script>
+<link rel="stylesheet" href="/index.css">
+  <!-- App favicon (use stockflow logo in /image) -->
+  <link rel="icon" type="image/png" href="/image/stockflow logo.png" />
+</head>
+  <body class="bg-white dark:bg-gray-900 transition-colors duration-300">
+    <div id="root"></div>
+    <script type="module" src="/index.tsx"></script>
+  </body>
+</html>
