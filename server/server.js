@@ -62,8 +62,13 @@ const initializeFirebase = async () => {
     let serviceAccount;
 
     if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
-      // Production (Railway): credentials supplied as a JSON string env var
-      serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+      // Production (Railway): credentials supplied as a JSON string env var.
+      // Some platforms mangle \n in the private_key to literal newlines — fix both cases.
+      const raw = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+      serviceAccount = JSON.parse(raw);
+      if (serviceAccount.private_key) {
+        serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+      }
     } else if (process.env.FIREBASE_SERVICE_ACCOUNT_PATH) {
       // Local dev: credentials loaded from a file
       serviceAccount = require(process.env.FIREBASE_SERVICE_ACCOUNT_PATH);
