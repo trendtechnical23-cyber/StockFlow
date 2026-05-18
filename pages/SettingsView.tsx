@@ -157,6 +157,12 @@ const SettingsView: React.FC = () => {
     const [orgData, setOrgData] = useState({ name: currentOrganization.name });
     const [isEditingOrg, setIsEditingOrg] = useState(false);
     const [isSavingOrg, setIsSavingOrg] = useState(false);
+
+    // Risk threshold (stock take financial control)
+    const [riskThreshold, setRiskThreshold] = useState<number>(
+        (currentOrganization as any).stockTakeSettings?.riskThresholdRands ?? 5000
+    );
+    const [isSavingRiskThreshold, setIsSavingRiskThreshold] = useState(false);
     
     const [isConfirmOpen, setIsConfirmOpen] = useState(false);
     const [userToDelete, setUserToDelete] = useState<User | null>(null);
@@ -185,7 +191,28 @@ const SettingsView: React.FC = () => {
         });
         addToast({ message: 'Zoho settings saved!', type: 'success' });
     };
-    
+
+    const handleRiskThresholdSave = async () => {
+        if (isNaN(riskThreshold) || riskThreshold < 0) {
+            addToast({ message: 'Please enter a valid threshold amount', type: 'error' });
+            return;
+        }
+        setIsSavingRiskThreshold(true);
+        try {
+            const updated = {
+                ...currentOrganization,
+                stockTakeSettings: { riskThresholdRands: riskThreshold },
+            };
+            await updateOrganizationAPI(currentOrganization.id, { stockTakeSettings: { riskThresholdRands: riskThreshold } } as any);
+            dispatch({ type: 'UPDATE_ORGANIZATION', payload: updated });
+            addToast({ message: 'Risk threshold saved!', type: 'success' });
+        } catch {
+            addToast({ message: 'Failed to save risk threshold', type: 'error' });
+        } finally {
+            setIsSavingRiskThreshold(false);
+        }
+    };
+
     const handleProfileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         setProfileData({ ...profileData, [e.target.name]: e.target.value });
     };
@@ -795,6 +822,38 @@ const SettingsView: React.FC = () => {
                             />
                         </div>
                     </div>
+                </div>
+            )}
+
+            {/* Stock Take Controls Card (admin only) */}
+            {currentUser.role === UserRole.Admin && (
+                <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg">
+                    <h2 className="text-xl font-semibold mb-1 text-gray-900 dark:text-gray-200">Stock Take Controls</h2>
+                    <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
+                        Adjustments with a total value impact above the risk threshold require explicit manager acknowledgement before approval.
+                    </p>
+                    <div className="flex items-center gap-4">
+                        <label htmlFor="riskThreshold" className="text-sm font-medium text-gray-700 dark:text-gray-300 whitespace-nowrap">
+                            High-risk threshold (R)
+                        </label>
+                        <input
+                            id="riskThreshold"
+                            type="number"
+                            min={0}
+                            step={500}
+                            value={riskThreshold}
+                            onChange={(e) => setRiskThreshold(Number(e.target.value))}
+                            className="w-36 bg-gray-100 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md py-1 px-2 text-gray-900 dark:text-white focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                        />
+                        <button
+                            onClick={handleRiskThresholdSave}
+                            disabled={isSavingRiskThreshold}
+                            className="px-4 py-2 text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 rounded-lg transition-colors"
+                        >
+                            {isSavingRiskThreshold ? 'Saving…' : 'Save'}
+                        </button>
+                    </div>
+                    <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">Default: R5,000. Current: R{riskThreshold.toLocaleString()}</p>
                 </div>
             )}
 

@@ -5,7 +5,7 @@
  * Uses Firestore for session management and syncing
  */
 
-import { 
+import {
   firestore,
   collection,
   doc,
@@ -31,6 +31,16 @@ export interface StockTakeSession {
   endTime?: number;
   itemsScanned: number;
   scannedItems: ScannedItem[];
+  /**
+   * Snapshot of every item's stock quantity taken at the exact moment this
+   * session was opened.  Keyed by Firestore item document ID.
+   * This is the authoritative "expected" quantity for variance calculations —
+   * never recalculate from live inventory after the session starts.
+   */
+  baselineSnapshot: Record<string, number>;
+  /** True once the session is ended — no edits to scanned quantities permitted after this. */
+  frozen?: boolean;
+  frozenAt?: number;
 }
 
 export interface ScannedItem {
@@ -66,6 +76,20 @@ class StockTakeService {
     if (!firestore) throw new Error('Firestore not initialized');
 
     try {
+      // ── Immutable baseline snapshot ────────────────────────────────────────
+      // Capture every item's current stock BEFORE the session opens.
+      // All variance calculations during this session use these frozen quantities;
+      // live inventory changes after this point must never affect expected values.
+      const inventorySnap = await getDocs(
+        collection(firestore, 'organizations', orgId, 'inventory')
+      );
+      const baselineSnapshot: Record<string, number> = {};
+      inventorySnap.forEach(d => {
+        const qty = d.data().stock ?? d.data().quantity ?? 0;
+        baselineSnapshot[d.id] = typeof qty === 'number' ? qty : Number(qty) || 0;
+      });
+      console.log(`📸 Baseline snapshot captured: ${Object.keys(baselineSnapshot).length} items`);
+
       const sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
       const sessionRef = doc(firestore, 'organizations', orgId, 'stockTakeSessions', sessionId);
 
@@ -77,7 +101,8 @@ class StockTakeService {
         status: 'ACTIVE',
         startTime: Date.now(),
         itemsScanned: 0,
-        scannedItems: []
+        scannedItems: [],
+        baselineSnapshot
       };
 
       await setDoc(sessionRef, {
@@ -104,9 +129,12 @@ class StockTakeService {
     try {
       const sessionRef = doc(firestore, 'organizations', orgId, 'stockTakeSessions', sessionId);
       
+      const frozenAt = Date.now();
       await updateDoc(sessionRef, {
         status: 'COMPLETED',
-        endTime: Date.now(),
+        endTime: frozenAt,
+        frozen: true,    // immutable — no quantity edits permitted after this
+        frozenAt,
         updatedAt: serverTimestamp()
       });
 

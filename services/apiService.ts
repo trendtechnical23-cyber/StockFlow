@@ -1,4 +1,4 @@
-import { InventoryItem, User, ActivityLogEntry, Organization, UserRole, ZohoIntegration, Subscription } from '../types';
+import { InventoryItem, User, ActivityLogEntry, Organization, UserRole, ZohoIntegration, Subscription, AuditLedgerEntry } from '../types';
 import { activityLogger } from './activityLogger';
 import { broadcastActivity } from '../serverBroadcast';
 import { MOCK_ZOHO_IMPORT } from '../constants';
@@ -2303,6 +2303,42 @@ console.log('🚀 Organization-centric API Service initialized');
 // Zoho Approval Workflow APIs
 // ============================
 
+/**
+ * Append an immutable entry to the audit ledger.
+ * Never call update/delete on these docs — they are the permanent financial record.
+ */
+const writeAuditEntry = async (
+  organizationId: string,
+  entry: Omit<AuditLedgerEntry, 'id' | 'timestamp'>
+): Promise<void> => {
+  try {
+    const ledgerRef = collection(firestore, 'organizations', organizationId, 'auditLedger');
+    await addDoc(ledgerRef, { ...entry, timestamp: serverTimestamp() });
+  } catch (err) {
+    // Audit write failures must never block the primary operation — log and continue.
+    console.error('⚠️ Audit ledger write failed (non-fatal):', err);
+  }
+};
+
+/**
+ * Query the audit ledger for a date range (for reconciliation reports).
+ */
+export const getAuditLedger = async (
+  organizationId: string,
+  startDate: Date,
+  endDate: Date
+): Promise<AuditLedgerEntry[]> => {
+  const ledgerRef = collection(firestore, 'organizations', organizationId, 'auditLedger');
+  const q = query(
+    ledgerRef,
+    where('timestamp', '>=', startDate),
+    where('timestamp', '<=', endDate),
+    orderBy('timestamp', 'desc')
+  );
+  const snap = await getDocs(q);
+  return snap.docs.map(d => ({ id: d.id, ...d.data() })) as AuditLedgerEntry[];
+};
+
 export interface ApprovalRequest {
   id: string;
   type: 'zoho_sync';
@@ -2318,11 +2354,14 @@ export interface ApprovalRequest {
     newQuantity?: number;
     updatedFields?: Record<string, any>;
     reason?: string;
+    expectedQuantity?: number;
+    unitCost?: number;
   };
   status: 'pending' | 'approved' | 'rejected';
   approvedBy?: string;
   approvedByName?: string;
   approvedAt?: any;
+  approvalComment?: string;
   rejectedBy?: string;
   rejectedByName?: string;
   rejectedAt?: any;
@@ -2330,8 +2369,8 @@ export interface ApprovalRequest {
   processed: boolean;
   zohoResponse?: any;
   error?: string;
-  source?: 'apk' | 'dashboard'; // Track where the request originated
-  stockTakeSessionId?: string; // Group stock take approvals
+  source?: 'apk' | 'dashboard';
+  stockTakeSessionId?: string;
   stockTakeSessionTimestamp?: string;
   stockTakeItemCount?: number;
 }
@@ -2358,24 +2397,62 @@ export const getApprovals = async (organizationId: string): Promise<ApprovalRequ
 /**
  * Create a new approval request
  */
+/**
+ * SHA-256 hash using the Web Crypto API (available in all modern browsers).
+ * Used to generate idempotency keys for approval requests.
+ */
+const sha256 = async (input: string): Promise<string> => {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+};
+
 export const createApprovalRequest = async (
   organizationId: string,
   approvalData: Omit<ApprovalRequest, 'id' | 'requestedAt' | 'status' | 'processed'>
 ): Promise<string> => {
   try {
+    // ── Idempotency hash ───────────────────────────────────────────────────
+    // Prevents duplicate Zoho transactions if the same approval is accidentally
+    // submitted twice (unstable network, double-tap, retry storm).
+    // Hash ingredients: session + SKU + counted qty + delta — uniquely identifies
+    // one specific count result for one item in one session.
+    const hashInput = [
+      approvalData.stockTakeSessionId ?? organizationId,
+      approvalData.itemSKU ?? approvalData.itemId ?? '',
+      String(approvalData.requestedChange?.newQuantity ?? ''),
+      String(approvalData.requestedChange?.quantityDelta ?? '')
+    ].join('|');
+    const idempotencyHash = await sha256(hashInput);
+
     const approvalsRef = collection(firestore, 'organizations', organizationId, 'approvals');
     const docRef = await addDoc(approvalsRef, {
       ...approvalData,
       requestedAt: serverTimestamp(),
       status: 'pending',
-      processed: false
+      processed: false,
+      approvalPhase: 'operational',   // Phase 1: operational review by warehouse/admin
+      idempotencyHash                 // Phase 2 guard: Zoho routes check this before syncing
     });
     
     console.log('✅ Approval request created:', docRef.id);
-    
-    // TODO: Send FCM notification to managers
-    // await notifyManagers(organizationId, docRef.id, approvalData);
-    
+
+    // Audit ledger: immutable record of this approval being created
+    await writeAuditEntry(organizationId, {
+      event: 'approval_created',
+      actor: approvalData.requestedBy,
+      actorName: approvalData.requestedByName || 'Unknown',
+      approvalId: docRef.id,
+      sessionId: approvalData.stockTakeSessionId,
+      itemId: approvalData.itemId,
+      itemName: approvalData.itemName,
+      itemSKU: approvalData.itemSKU,
+      quantityDelta: approvalData.requestedChange?.quantityDelta,
+      newQuantity: approvalData.requestedChange?.newQuantity,
+      expectedQuantity: approvalData.requestedChange?.expectedQuantity,
+      unitCost: approvalData.requestedChange?.unitCost,
+      valueImpact: (approvalData.requestedChange?.quantityDelta ?? 0) * (approvalData.requestedChange?.unitCost ?? 0)
+    });
+
     return docRef.id;
   } catch (error) {
     console.error('Error creating approval request:', error);
@@ -2394,7 +2471,8 @@ export const approveZohoSync = async (
   organizationId: string,
   approvalId: string,
   approverUid: string,
-  zohoConnected: boolean = false
+  zohoConnected: boolean = false,
+  approvalComment: string = ''
 ): Promise<void> => {
   try {
     // Get approver name
@@ -2418,7 +2496,26 @@ export const approveZohoSync = async (
       status: 'approved',
       approvedBy: approverUid,
       approvedByName: approverName,
-      approvedAt: serverTimestamp()
+      approvedAt: serverTimestamp(),
+      ...(approvalComment.trim() ? { approvalComment: approvalComment.trim() } : {})
+    });
+
+    // Audit ledger: immutable record of operational approval
+    await writeAuditEntry(organizationId, {
+      event: 'approved',
+      actor: approverUid,
+      actorName: approverName,
+      approvalId,
+      sessionId: approval.stockTakeSessionId,
+      itemId: approval.itemId,
+      itemName: approval.itemName,
+      itemSKU: approval.itemSKU,
+      quantityDelta: approval.requestedChange?.quantityDelta,
+      newQuantity: approval.requestedChange?.newQuantity,
+      expectedQuantity: approval.requestedChange?.expectedQuantity,
+      unitCost: approval.requestedChange?.unitCost,
+      valueImpact: (approval.requestedChange?.quantityDelta ?? 0) * (approval.requestedChange?.unitCost ?? 0),
+      approvalComment: approvalComment.trim() || undefined
     });
 
     console.log('✅ Approval request approved:', approvalId);
@@ -2660,7 +2757,24 @@ export const rejectZohoSync = async (
     });
     
     console.log('✅ Approval request rejected:', approvalId);
-    
+
+    // Audit ledger: immutable record of the rejection
+    await writeAuditEntry(organizationId, {
+      event: 'rejected',
+      actor: rejecterUid,
+      actorName: rejecterName,
+      approvalId,
+      sessionId: approval.stockTakeSessionId,
+      itemId: approval.itemId,
+      itemName: approval.itemName,
+      itemSKU: approval.itemSKU,
+      quantityDelta: approval.requestedChange?.quantityDelta,
+      expectedQuantity: approval.requestedChange?.expectedQuantity,
+      unitCost: approval.requestedChange?.unitCost,
+      valueImpact: (approval.requestedChange?.quantityDelta ?? 0) * (approval.requestedChange?.unitCost ?? 0),
+      rejectionReason: reason
+    });
+
     // Create activity log for the rejection
     const activityRef = collection(firestore, 'organizations', organizationId, 'activityLogs');
     await addDoc(activityRef, {

@@ -515,6 +515,15 @@ router.post('/approvals/session/process', verifyFirebaseToken, async (req, res) 
                 continue;
             }
 
+            // ── Duplicate sync protection (per-item) ──────────────────────────
+            // If this approval already has a Zoho adjustment ID, it was synced in a
+            // previous (possibly partial) batch run.  Skip it — do NOT double-post.
+            if (approval.zohoResponse?.adjustmentId) {
+                console.warn(`⚠️ Approval ${approval.id} already synced (${approval.zohoResponse.adjustmentId}) — skipping`);
+                skipped.push({ id: approval.id, reason: 'already synced to Zoho' });
+                continue;
+            }
+
             const zohoItemId = skuMap.get(sku);
             if (!zohoItemId) {
                 console.warn(`⚠️ SKU '${sku}' not found in Zoho — skipping approval ${approval.id}`);
@@ -562,16 +571,48 @@ router.post('/approvals/session/process', verifyFirebaseToken, async (req, res) 
             batch.update(ref, {
                 processed: true,
                 processedAt,
+                approvalPhase: 'financial',   // Phase 2: financial sync to Zoho Books done
                 zohoResponse: {
                     adjustmentId,
                     status: adj?.status || null,
                     date: adj?.date || null,
-                    referenceNumber: adj?.reference_number || referenceNumber
+                    referenceNumber: adj?.reference_number || null
                 },
                 error: null
             });
         }
         await batch.commit();
+
+        // Audit ledger: one entry per approval that was synced
+        try {
+            const auditBatch = db.batch();
+            for (const approval of approvals) {
+                if (!approval.itemSKU || !skuMap.get(approval.itemSKU)) continue;
+                const auditRef = db.collection('organizations').doc(orgId)
+                    .collection('auditLedger').doc();
+                auditBatch.set(auditRef, {
+                    event: 'zoho_synced',
+                    timestamp: admin.firestore.FieldValue.serverTimestamp(),
+                    actor: approval.approvedBy || 'system',
+                    actorName: approval.approvedByName || 'System',
+                    approvalId: approval.id,
+                    sessionId,
+                    itemId: approval.itemId || null,
+                    itemName: approval.itemName || null,
+                    itemSKU: approval.itemSKU,
+                    quantityDelta: approval.requestedChange?.quantityDelta ?? null,
+                    newQuantity: approval.requestedChange?.newQuantity ?? null,
+                    expectedQuantity: approval.requestedChange?.expectedQuantity ?? null,
+                    unitCost: approval.requestedChange?.unitCost ?? null,
+                    valueImpact: (approval.requestedChange?.quantityDelta ?? 0) * (approval.requestedChange?.unitCost ?? 0),
+                    approvalComment: approval.approvalComment || null,
+                    zohoAdjustmentId: adjustmentId
+                });
+            }
+            await auditBatch.commit();
+        } catch (auditErr) {
+            console.warn('⚠️ Audit ledger batch write failed (non-fatal):', auditErr.message);
+        }
 
         res.json({
             success: true,
@@ -729,6 +770,19 @@ router.post('/approvals/:approvalId/process', verifyFirebaseToken, async (req, r
             return res.json({ success: true, message: 'Already processed', data: { alreadyProcessed: true } });
         }
 
+        // ── Duplicate sync protection ──────────────────────────────────────────
+        // A Zoho adjustment ID present means Phase 2 already completed successfully.
+        // Refuse to POST a second adjustment to Zoho — double-posting corrupts FIFO
+        // valuation and creates phantom entries in the accounting ledger.
+        if (approval.zohoResponse?.adjustmentId) {
+            console.warn(`⚠️  Approval ${approvalId} already has Zoho adjustment ${approval.zohoResponse.adjustmentId} — refusing duplicate sync`);
+            return res.json({
+                success: true,
+                message: 'Adjustment already exists in Zoho Books — duplicate sync prevented',
+                data: { alreadyProcessed: true, adjustmentId: approval.zohoResponse.adjustmentId }
+            });
+        }
+
         if (approval.action !== 'adjust_stock') {
             return res.status(400).json({
                 success: false,
@@ -784,20 +838,47 @@ router.post('/approvals/:approvalId/process', verifyFirebaseToken, async (req, r
             referenceNumber
         );
 
-        // Mark the approval as processed with Zoho response details
+        // Phase 2 complete — mark processed and advance approvalPhase to 'financial'
         await approvalRef.update({
             processed: true,
             processedAt: admin.firestore.FieldValue.serverTimestamp(),
+            approvalPhase: 'financial',   // Phase 2: financial sync to Zoho Books done
             zohoResponse: {
                 adjustmentId: zohoResponse?.inventory_adjustment_id || null,
                 status: zohoResponse?.status || null,
                 date: zohoResponse?.date || null,
-                referenceNumber: zohoResponse?.reference_number || referenceNumber
+                referenceNumber: zohoResponse?.reference_number || null
             },
             error: null
         });
 
         console.log(`✅ Approval ${approvalId} processed — Zoho adjustment ID: ${zohoResponse?.inventory_adjustment_id}`);
+
+        // Audit ledger: immutable record that this item was synced to Zoho Books
+        try {
+            await admin.firestore()
+                .collection('organizations').doc(orgId)
+                .collection('auditLedger').add({
+                    event: 'zoho_synced',
+                    timestamp: admin.firestore.FieldValue.serverTimestamp(),
+                    actor: approval.approvedBy || 'system',
+                    actorName: approval.approvedByName || 'System',
+                    approvalId,
+                    sessionId: approval.stockTakeSessionId || null,
+                    itemId: approval.itemId || null,
+                    itemName: approval.itemName || null,
+                    itemSKU: approval.itemSKU || null,
+                    quantityDelta,
+                    newQuantity: approval.requestedChange?.newQuantity ?? null,
+                    expectedQuantity: approval.requestedChange?.expectedQuantity ?? null,
+                    unitCost: approval.requestedChange?.unitCost ?? null,
+                    valueImpact: quantityDelta * (approval.requestedChange?.unitCost ?? 0),
+                    approvalComment: approval.approvalComment || null,
+                    zohoAdjustmentId: zohoResponse?.inventory_adjustment_id || null
+                });
+        } catch (auditErr) {
+            console.warn('⚠️ Audit ledger write failed (non-fatal):', auditErr.message);
+        }
 
         res.json({
             success: true,

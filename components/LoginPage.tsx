@@ -239,24 +239,8 @@ const LoginPage: React.FC = () => {
   //   handleRedirectResult();
   // }, [addToast]);
 
-  // Check if email was invited when user types in signup mode
-  const checkIfInvited = async (email: string) => {
-    if (!isSignUp || !email.includes('@')) return;
-    
-    try {
-      const { getUserByEmail } = await import('../services/apiService');
-      const invitedUser = await getUserByEmail(email.toLowerCase().trim());
-      
-      if (invitedUser && invitedUser.user.invited) {
-        setInviteInfo({ orgName: invitedUser.organization.name });
-        setOrgName(invitedUser.organization.name); // Pre-fill but disable
-      } else {
-        setInviteInfo(null);
-      }
-    } catch (e) {
-      setInviteInfo(null);
-    }
-  };
+  // Invite pre-detection requires authentication and cannot run before signup.
+  // Invite lookup is performed after Firebase auth creation inside handleEmailAuth.
 
   // Don't clear data automatically - let users keep their settings
 
@@ -322,11 +306,6 @@ const LoginPage: React.FC = () => {
         return false;
       }
 
-      if (!orgName.trim()) {
-        addToast('Organization name is required', 'error');
-        return false;
-      }
-
       if (password.length < 6) {
         addToast('Password must be at least 6 characters', 'error');
         return false;
@@ -358,107 +337,112 @@ const LoginPage: React.FC = () => {
 
     setIsLoading(true);
 
-    try {
-      if (isSignUp) {
-        // Check if user was invited to an existing organization
-        const { getUserByEmail } = await import('../services/apiService');
-        let invitedUser = null;
-        
-        try {
-          invitedUser = await getUserByEmail(email.toLowerCase().trim());
-        } catch (e) {
-          // User wasn't invited, continue with normal signup
-        }
-
-        if (invitedUser && invitedUser.user.invited) {
-          // User was invited - create auth account and link to existing organization
-          const userCredential = await createUserWithEmailAndPassword(auth!, email.trim(), password);
-          
-          // Update the invited user record with the real Firebase UID
-          const { updateUserInOrganization } = await import('../services/apiService');
-          const updatedUser = {
-            ...invitedUser.user,
-            uid: userCredential.user.uid,
-            name: name.trim() || invitedUser.user.name,
-            invited: false // No longer invited, they're active
-          };
-          
-          // Remove the temporary invite record and create the real user record
-          await updateUserInOrganization(updatedUser);
-          
-          addToast(`🎉 Welcome to ${invitedUser.organization.name}! Your account has been activated.`, 'success');
-        } else {
-          // Regular signup - create new account and organization
-          const userCredential = await createUserWithEmailAndPassword(auth!, email.trim(), password);
-          
-          // Clear all localStorage view tracking for fresh start
-          localStorage.removeItem('currentView');
-          localStorage.removeItem('pendingView');
-          
-          await createOrganizationAndUser({
-            name: name.trim(),
-            email: email.toLowerCase().trim(),
-            orgName: orgName.trim(),
-            uid: userCredential.user.uid
-          });
-          addToast(`🎉 Welcome to StockFlow! Organization '${orgName}' created successfully.`, 'success');
-        }
-
-        // Wait for Firestore batch commit to complete and replicate
-        await new Promise(resolve => setTimeout(resolve, 2000));
-      } else {
-        // Sign in existing user
+    // ── Sign-in path ───────────────────────────────────────────────────────
+    if (!isSignUp) {
+      try {
         await signInWithEmailAndPassword(auth!, email.trim(), password);
         addToast('Welcome back! Signed in successfully.', 'success');
+      } catch (error: any) {
+        console.error('Sign-in error:', error);
+        if (error.code === 'auth/user-not-found' || error.code === 'auth/invalid-credential' || error.code === 'auth/wrong-password') {
+          addToast('Invalid email or password. Please check your credentials and try again.', 'error');
+        } else if (error.code === 'auth/too-many-requests') {
+          addToast('Too many failed attempts. Please try again later.', 'error');
+          handleRateLimit();
+        } else {
+          addToast(error.message || 'Sign-in failed. Please try again.', 'error');
+        }
+      } finally {
+        setIsLoading(false);
       }
+      return;
+    }
+
+    // ── Sign-up path ───────────────────────────────────────────────────────
+    // CRITICAL ORDER: create Firebase auth FIRST, then do Firestore work.
+    //
+    // Reason 1 (invite detection): getUserByEmail() requires auth.currentUser —
+    //   calling it before createUserWithEmailAndPassword always returns null,
+    //   so invited users were silently routed to a fresh org creation.
+    //
+    // Reason 2 (orphaned accounts): if Firestore work fails after Firebase auth
+    //   succeeds, the user ends up with an auth account but no org — they
+    //   can't sign in (app signs them out) and can't re-signup (email taken).
+    //   We delete the auth account in the catch block so they can retry cleanly.
+
+    let userCredential: Awaited<ReturnType<typeof createUserWithEmailAndPassword>> | null = null;
+
+    try {
+      // Step 1: Create the Firebase auth account.
+      userCredential = await createUserWithEmailAndPassword(auth!, email.trim(), password);
+
+      localStorage.removeItem('currentView');
+      localStorage.removeItem('pendingView');
+
+      // Step 2: User is now authenticated — invite lookup will work.
+      let invitedUser = null;
+      try {
+        const { getUserByEmail } = await import('../services/apiService');
+        invitedUser = await getUserByEmail(email.toLowerCase().trim());
+      } catch {
+        // Firestore lookup failed — treat as no invite and continue.
+      }
+
+      if (invitedUser && invitedUser.user.invited) {
+        // Step 3a: Invited path — activate the pre-created user record.
+        const { updateUserInOrganization } = await import('../services/apiService');
+        await updateUserInOrganization({
+          ...invitedUser.user,
+          uid: userCredential.user.uid,
+          name: name.trim() || invitedUser.user.name,
+          invited: false
+        });
+        setInviteInfo({ orgName: invitedUser.organization.name });
+        addToast(`Welcome to ${invitedUser.organization.name}! Your account has been activated.`, 'success');
+      } else {
+        // Step 3b: New org path — validate orgName here since we now know they're not invited.
+        if (!orgName.trim()) {
+          addToast('Organization name is required', 'error');
+          await userCredential!.user.delete();
+          return;
+        }
+        await createOrganizationAndUser({
+          name: name.trim(),
+          email: email.toLowerCase().trim(),
+          orgName: orgName.trim(),
+          uid: userCredential.user.uid
+        });
+        addToast(`Welcome to StockFlow! Organization '${orgName}' created successfully.`, 'success');
+      }
+
+      // Allow Firestore replication to settle before the app reads user data.
+      await new Promise(resolve => setTimeout(resolve, 2000));
+
     } catch (error: any) {
-      console.error('Authentication error:', error);
-      
-      // Handle specific Firebase errors
+      console.error('Signup error:', error);
+
+      // If the Firebase auth account was created but Firestore failed, delete the
+      // auth account so the user is NOT permanently locked out (can re-signup).
+      if (userCredential?.user) {
+        try {
+          await userCredential.user.delete();
+          console.log('Cleaned up orphaned auth account after Firestore failure');
+        } catch (deleteErr) {
+          // If cleanup itself fails, log it but don't mask the original error.
+          console.error('Failed to clean up orphaned auth account:', deleteErr);
+        }
+      }
+
       if (error.code === 'auth/email-already-in-use') {
         addToast('This email is already registered. Please sign in instead.', 'error');
         setIsSignUp(false);
-      } else if (error.code === 'auth/user-not-found') {
-        // Check if this email was invited to an organization
-        try {
-          const { getUserByEmail } = await import('../services/apiService');
-          const invitedUser = await getUserByEmail(email.toLowerCase().trim());
-          
-          if (invitedUser && invitedUser.user.invited) {
-            addToast(`You were invited to join ${invitedUser.organization.name}. Please create your account by signing up with this email.`, 'info');
-            setIsSignUp(true);
-          } else {
-            addToast('No account found with this email. Please sign up first.', 'error');
-            setIsSignUp(true);
-          }
-        } catch {
-          addToast('No account found with this email. Please sign up first.', 'error');
-          setIsSignUp(true);
-        }
-      } else if (error.code === 'auth/wrong-password' || error.code === 'auth/invalid-credential') {
-        // Check if this email was invited to an organization
-        try {
-          const { getUserByEmail } = await import('../services/apiService');
-          const invitedUser = await getUserByEmail(email.toLowerCase().trim());
-          
-          if (invitedUser && invitedUser.user.invited) {
-            addToast(`You were invited to join ${invitedUser.organization.name}. Please create your account by signing up with this email.`, 'info');
-            setIsSignUp(true);
-          } else {
-            addToast('Invalid email or password. Please check your credentials and try again.', 'error');
-          }
-        } catch {
-          addToast('Invalid email or password. Please check your credentials and try again.', 'error');
-        }
+      } else if (error.code === 'auth/weak-password') {
+        addToast('Password is too weak. Please choose a stronger password.', 'error');
       } else if (error.code === 'auth/too-many-requests') {
         addToast('Too many failed attempts. Please try again later.', 'error');
         handleRateLimit();
-      } else if (error.code === 'auth/weak-password') {
-        addToast('Password is too weak. Please choose a stronger password.', 'error');
-      } else if (error.message?.includes('organization')) {
-        addToast(error.message, 'error');
       } else {
-        addToast(error.message || 'Authentication failed. Please try again.', 'error');
+        addToast(error.message || 'Account setup failed. Please try again.', 'error');
       }
     } finally {
       setIsLoading(false);
@@ -679,11 +663,7 @@ const LoginPage: React.FC = () => {
               id="email"
               type="email"
               value={email}
-              onChange={(e) => {
-                setEmail(e.target.value);
-                // Note: checkIfInvited removed - requires authentication
-                // Invite detection will happen after signup attempt if needed
-              }}
+              onChange={(e) => setEmail(e.target.value)}
               placeholder="john@company.com"
               required
               className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent dark:bg-gray-700 dark:text-gray-100"

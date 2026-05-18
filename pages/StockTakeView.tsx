@@ -20,15 +20,12 @@ const StockTakeView: React.FC = () => {
     const { state, dispatch, handleUpdateItem } = useAppContext();
     const { inventory, users } = state;
     const addToast = useToast();
-    const { 
-        activeSession, 
-        isSessionActive, 
-        startStockTakeSession: startRealtimeSession, 
+    const {
+        activeSession,
+        isSessionActive,
+        startStockTakeSession: startRealtimeSession,
         endStockTakeSession: endRealtimeSession,
         getSessionSummary,
-        sendTestNotification,
-        notifications,
-        allSessions
     } = useStockTake();
     
     const [phase, setPhase] = useState<StockTakePhase>('idle');
@@ -50,6 +47,7 @@ const StockTakeView: React.FC = () => {
     }, [activeSession, phase]);
     const [discrepancyReport, setDiscrepancyReport] = useState<DiscrepancyItem[]>([]);
     const [isSubmitting, setIsSubmitting] = useState(false);
+    const [sessionFrozen, setSessionFrozen] = useState(false);
     
     
     const handleStart = async () => {
@@ -170,6 +168,7 @@ const StockTakeView: React.FC = () => {
                 // Create approval requests for each discrepancy with session tracking
                 const approvalPromises = itemsWithDiscrepancy.map(async (item) => {
                     const quantityDelta = item.discrepancy;
+                    const inventoryItem = inventory.find(i => i.id === item.id);
                     return createApprovalRequest(state.currentOrganization.id, {
                         type: 'zoho_sync',
                         action: 'adjust_stock',
@@ -181,7 +180,9 @@ const StockTakeView: React.FC = () => {
                         requestedChange: {
                             quantityDelta,
                             newQuantity: item.countedStock,
-                            reason: 'Stock take adjustment'
+                            reason: 'Stock take adjustment',
+                            expectedQuantity: item.expectedStock,
+                            unitCost: inventoryItem?.cost ?? 0
                         },
                         source: 'dashboard',
                         stockTakeSessionId,
@@ -192,16 +193,18 @@ const StockTakeView: React.FC = () => {
                 
                 await Promise.all(approvalPromises);
                 
-                addToast({ 
-                    message: `${itemsWithDiscrepancy.length} stock take change(s) sent for approval. Changes will sync to Zoho after approval.`, 
-                    type: 'info' 
+                addToast({
+                    message: `${itemsWithDiscrepancy.length} stock take change(s) sent for approval. Changes will sync to Zoho after approval.`,
+                    type: 'info'
                 });
-                
-                dispatch({ type: 'ADD_LOG', payload: { 
-                    user: state.currentUser.email, 
-                    action: `Requested approval: ${itemsWithDiscrepancy.length} stock take amendments pending approval.` 
+
+                setSessionFrozen(true);
+
+                dispatch({ type: 'ADD_LOG', payload: {
+                    user: state.currentUser.email,
+                    action: `Requested approval: ${itemsWithDiscrepancy.length} stock take amendments pending approval.`
                 } });
-                
+
             } else {
                 // No Zoho connection - apply changes directly
                 const updatePromises = itemsWithDiscrepancy.map(item => {
@@ -243,8 +246,8 @@ const StockTakeView: React.FC = () => {
     
     const handleFinishReview = () => {
         setPhase('idle');
-        // No simulated progress items to clear after removal
         setDiscrepancyReport([]);
+        setSessionFrozen(false);
     }
 
     const itemsToApplyCount = useMemo(() => {
@@ -292,20 +295,6 @@ const StockTakeView: React.FC = () => {
                         : "Start a new session to enable stock counting on connected mobile devices. The dashboard will monitor progress in real-time."
                     }
                 </p>
-                
-                {/* Debug Section */}
-                <div className="mt-4 p-4 bg-yellow-50 dark:bg-yellow-900/20 rounded-lg border border-yellow-200 dark:border-yellow-800">
-                    <h3 className="font-semibold text-yellow-800 dark:text-yellow-200 mb-2">🧪 Debug Real-Time System</h3>
-                    <p className="text-sm text-yellow-700 dark:text-yellow-300 mb-3">
-                        Notifications received: {notifications.length} | Active session: {activeSession ? 'Yes' : 'No'}
-                    </p>
-                    <button
-                        onClick={sendTestNotification}
-                        className="px-4 py-2 bg-yellow-600 text-white rounded-md hover:bg-yellow-700 transition-colors text-sm"
-                    >
-                        Send Test Notification
-                    </button>
-                </div>
                 
                 <button
                     onClick={handleStart}
@@ -456,6 +445,21 @@ const StockTakeView: React.FC = () => {
             <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg">
                  <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100 mb-2">Stock Take Review</h1>
                  <p className="text-gray-600 dark:text-gray-400 mb-4">Review the discrepancies found during the count. Apply changes to update your inventory records.</p>
+
+                 {/* Session Frozen Banner */}
+                 {sessionFrozen && (
+                     <div className="mb-4 p-4 bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700 rounded-lg flex items-center gap-3">
+                         <span className="text-2xl">🔒</span>
+                         <div>
+                             <p className="font-semibold text-amber-800 dark:text-amber-300">Session Frozen — Pending Approval</p>
+                             <p className="text-sm text-amber-700 dark:text-amber-400">
+                                 Adjustments have been submitted for approval. Counted quantities are now locked and cannot be edited.
+                                 Quantities will only be updated in your inventory after an admin approves and syncs to Zoho Books.
+                             </p>
+                         </div>
+                     </div>
+                 )}
+
                  <div className="flex justify-between items-center mb-4">
                      <button onClick={handleFinishReview} className="px-4 py-2 bg-gray-200 dark:bg-gray-600 text-gray-800 dark:text-white font-semibold rounded-md hover:bg-gray-300 dark:hover:bg-gray-500 transition-colors">
                         Cancel
@@ -465,9 +469,9 @@ const StockTakeView: React.FC = () => {
                             <ExportIcon />
                             Export Report
                         </button>
-                        <button onClick={handleApplyChanges} disabled={isSubmitting || itemsToApplyCount === 0} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white font-semibold rounded-md hover:bg-indigo-700 disabled:bg-indigo-800 disabled:cursor-not-allowed transition-colors">
+                        <button onClick={handleApplyChanges} disabled={isSubmitting || itemsToApplyCount === 0 || sessionFrozen} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white font-semibold rounded-md hover:bg-indigo-700 disabled:bg-indigo-800 disabled:cursor-not-allowed transition-colors">
                             <SyncIcon />
-                            {isSubmitting ? 'Applying...' : `Apply ${itemsToApplyCount} Changes`}
+                            {isSubmitting ? 'Applying...' : sessionFrozen ? 'Submitted — Awaiting Approval' : `Apply ${itemsToApplyCount} Changes`}
                         </button>
                     </div>
                  </div>
@@ -494,8 +498,13 @@ const StockTakeView: React.FC = () => {
                                         <input
                                             type="number"
                                             value={item.countedStock}
-                                            onChange={(e) => handleCountedStockChange(item.id, parseInt(e.target.value, 10) || 0)}
-                                            className="w-20 text-center bg-transparent dark:bg-gray-700/50 rounded-md border border-gray-300 dark:border-gray-600 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                                            onChange={(e) => !sessionFrozen && handleCountedStockChange(item.id, parseInt(e.target.value, 10) || 0)}
+                                            readOnly={sessionFrozen}
+                                            className={`w-20 text-center rounded-md border focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 ${
+                                                sessionFrozen
+                                                    ? 'bg-gray-100 dark:bg-gray-700 border-gray-200 dark:border-gray-600 cursor-not-allowed text-gray-500'
+                                                    : 'bg-transparent dark:bg-gray-700/50 border-gray-300 dark:border-gray-600'
+                                            }`}
                                         />
                                     </td>
                                     <td className={`px-6 py-4 text-center font-bold ${item.discrepancy > 0 ? 'text-green-500' : item.discrepancy < 0 ? 'text-red-500' : ''}`}>
@@ -508,48 +517,6 @@ const StockTakeView: React.FC = () => {
                  </div>
             </div>
 
-            {/* Debug Section - Shows all sessions */}
-            <div className="bg-gray-50 p-4 rounded-lg mt-6">
-                <h3 className="text-lg font-bold text-gray-800 mb-4">
-                    🔍 Debug: All Stock Take Sessions ({allSessions.length})
-                </h3>
-                {allSessions.length > 0 ? (
-                    <div className="space-y-2">
-                        {allSessions.slice(0, 5).map((session) => (
-                            <div key={session.id} className="bg-white p-3 rounded border">
-                                <div className="flex justify-between items-center">
-                                    <div>
-                                        <strong>{session.id}</strong>
-                                        <span className={`ml-2 px-2 py-1 text-xs rounded ${
-                                            session.status === 'ACTIVE' ? 'bg-green-100 text-green-800' :
-                                            session.status === 'COMPLETED' ? 'bg-blue-100 text-blue-800' :
-                                            'bg-gray-100 text-gray-800'
-                                        }`}>
-                                            {session.status}
-                                        </span>
-                                    </div>
-                                    <div className="text-sm text-gray-600">
-                                        Items: {session.itemsScanned || 0}
-                                    </div>
-                                </div>
-                                <div className="text-xs text-gray-500 mt-1">
-                                    User: {session.userName} | Device: {session.deviceId} | 
-                                    Start: {new Date(session.startTime).toLocaleString()}
-                                </div>
-                            </div>
-                        ))}
-                        {allSessions.length > 5 && (
-                            <div className="text-sm text-gray-600 text-center">
-                                ... and {allSessions.length - 5} more sessions
-                            </div>
-                        )}
-                    </div>
-                ) : (
-                    <div className="text-gray-600 text-center py-4">
-                        No stock take sessions found. Try syncing from the APK.
-                    </div>
-                )}
-            </div>
         );
     }
 

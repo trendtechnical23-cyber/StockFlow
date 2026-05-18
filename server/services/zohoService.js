@@ -670,11 +670,11 @@ class ZohoService {
                 this.getZohoOrgIdForOrg(organizationId)
             ]);
 
+            // Keep the Zoho payload strictly minimal — only fields Zoho needs.
+            // No local workflow fields, no fake statuses, no reference numbers that
+            // could be regenerated differently on a retry and cause a mismatch.
             const payload = {
-                date: new Date().toISOString().split('T')[0],
                 reason: reason || 'Stock adjustment via StockFlow',
-                reference_number: referenceNumber || `SF-ADJ-${Date.now()}`,
-                adjustment_type: 'quantity',
                 line_items: [{
                     item_id: zohoItemId,
                     quantity_adjusted: quantityAdjusted
@@ -727,15 +727,13 @@ class ZohoService {
                 this.getZohoOrgIdForOrg(organizationId)
             ]);
 
+            // Keep the Zoho payload strictly minimal — only fields Zoho needs.
             const payload = {
-                date: new Date().toISOString().split('T')[0],
                 reason: reason || 'Stock take adjustment via StockFlow',
-                reference_number: referenceNumber || `SF-BATCH-${Date.now()}`,
-                adjustment_type: 'quantity',
                 line_items: lineItems
             };
 
-            console.log(`📤 Batch adjustment payload: ${lineItems.length} line items, ref: ${payload.reference_number}`);
+            console.log(`📤 Batch adjustment payload: ${lineItems.length} line items`);
 
             const response = await axios.post(
                 `${this.booksApiUrl}/inventoryadjustments`,

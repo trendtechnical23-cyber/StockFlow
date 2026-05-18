@@ -27,8 +27,14 @@ server/.env.development
 server/firebase-admin-key.json
 server/ServiceAccountKey.json
 
-# APK Google Services
+# APK Google Services (contains Firebase project credentials)
 APK/app/google-services.json
+
+# APK build artifacts
+APK/app/build/
+APK/.gradle/
+APK/.kotlin/errors/
+APK/local.properties
 
 # Editor directories and files
 .vscode/*

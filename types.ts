@@ -57,6 +57,11 @@ export interface Subscription {
     endDate?: string;
 }
 
+export interface StockTakeOrgSettings {
+    /** Value impact in ZAR above which an adjustment is flagged high-risk and requires explicit acknowledgement. Default 5000. */
+    riskThresholdRands: number;
+}
+
 // Updated Organization interface - extends Firebase version
 export interface Organization extends Omit<FirebaseOrganization, 'plan'> {
     id: string;
@@ -66,6 +71,35 @@ export interface Organization extends Omit<FirebaseOrganization, 'plan'> {
         pos?: PosIntegration;
     };
     subscription: Subscription;
+    stockTakeSettings?: StockTakeOrgSettings;
+}
+
+export type AuditEventType =
+    | 'approval_created'
+    | 'approved'
+    | 'rejected'
+    | 'zoho_synced';
+
+export interface AuditLedgerEntry {
+    id?: string;
+    event: AuditEventType;
+    timestamp: any; // Firestore serverTimestamp
+    actor: string;          // UID
+    actorName: string;
+    approvalId: string;
+    sessionId?: string;
+    itemId?: string;
+    itemName?: string;
+    itemSKU?: string;
+    quantityDelta?: number;
+    newQuantity?: number;
+    expectedQuantity?: number;
+    unitCost?: number;
+    valueImpact?: number;
+    riskFlagged?: boolean;
+    approvalComment?: string;
+    rejectionReason?: string;
+    zohoAdjustmentId?: string;
 }
 
 // Legacy User interface - will be migrated to OrgMember + User pattern

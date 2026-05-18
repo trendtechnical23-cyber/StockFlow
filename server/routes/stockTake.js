@@ -142,6 +142,28 @@ router.post('/scan-item', verifyFirebaseToken, async (req, res) => {
         const itemName = itemData.name || itemData.itemName || 'Unknown Item';
         const sku = itemData.sku || 'Unknown SKU';
 
+        // ── Baseline snapshot lookup ───────────────────────────────────────────
+        // Always use the quantity frozen at session-open time, NOT the current live
+        // stock value.  Stock movements that happen during the count (sales, receipts)
+        // must NOT silently change the expected value — that would corrupt the variance
+        // and the audit trail.  Client-supplied expectedQuantity is ignored.
+        let frozenExpectedQty = itemData.stock ?? itemData.quantity ?? 0;
+        try {
+            const sessionFirestoreRef = admin.firestore()
+                .collection('organizations').doc(orgId)
+                .collection('stockTakeSessions').doc(sessionId);
+            const sessionSnap = await sessionFirestoreRef.get();
+            if (sessionSnap.exists) {
+                const baseline = sessionSnap.data()?.baselineSnapshot;
+                if (baseline && typeof baseline[itemId] === 'number') {
+                    frozenExpectedQty = baseline[itemId];
+                }
+            }
+        } catch (baselineErr) {
+            // Non-fatal: fall back to live stock value and log — do NOT block the scan
+            console.warn(`⚠️ Baseline read failed for item ${itemId}, using live stock value:`, baselineErr.message);
+        }
+
     // Update stock take session in Realtime Database.
     // Canonical path (used by Dashboard): organizations/{orgId}/stockTakeSessions/{sessionId}
     // Legacy path (used by current APK build): stockTakeSessions/{orgId}/{sessionId}
@@ -156,7 +178,7 @@ router.post('/scan-item', verifyFirebaseToken, async (req, res) => {
             itemName: itemName,
             sku: sku,
             scannedQuantity: parseInt(scannedQuantity),
-            expectedQuantity: expectedQuantity || itemData.quantity || 0,
+            expectedQuantity: frozenExpectedQty,   // always from baseline, never live
             scannedBy: scannedBy || 'Unknown User',
             scannedAt: Date.now(),
             deviceId: deviceId || 'unknown_device'
@@ -230,8 +252,8 @@ router.post('/scan-item', verifyFirebaseToken, async (req, res) => {
                     itemName: itemName,
                     sku: sku,
                     scannedQuantity: parseInt(scannedQuantity),
-                    expectedQuantity: expectedQuantity || itemData.quantity || 0,
-                    variance: parseInt(scannedQuantity) - (expectedQuantity || itemData.quantity || 0),
+                    expectedQuantity: frozenExpectedQty,
+                    variance: parseInt(scannedQuantity) - frozenExpectedQty,
                     deviceId: deviceId || 'unknown_device'
                 }
             });
@@ -244,7 +266,7 @@ router.post('/scan-item', verifyFirebaseToken, async (req, res) => {
             itemId: itemId,
             itemName: itemName,
             scannedQuantity: parseInt(scannedQuantity),
-            expectedQuantity: expectedQuantity || itemData.quantity || 0
+            expectedQuantity: frozenExpectedQty
         });
 
     } catch (error) {
