@@ -114,31 +114,27 @@ app.get(['/callback/zoho', '/zoho/callback'], (req, res) => {
 
 // Start server
 const startServer = async () => {
-  // Initialize Firebase first
-  await initializeFirebase();
-  
-  // Initialize FCM and Firestore listeners
-  const firestoreListenerService = require('./services/firestoreListenerService');
-  
-  // Start Firestore listeners for automatic notifications in LAZY mode.
-  // This starts only the global `activities` listener to avoid opening per-org
-  // listeners for every organization at startup (which can cause Firestore
-  // RESOURCE_EXHAUSTED / quota exceeded errors). Per-org listeners are started
-  // when a device registers or an org becomes active.
-  setTimeout(() => {
-    firestoreListenerService.startListeners(/* startAll */ false);
-  }, 2000); // Small delay to ensure Firebase is fully initialized
+  const PORT = process.env.PORT || 4000;
+  // Bind to 0.0.0.0 in production so Railway can route traffic to the container
+  const HOST = process.env.NODE_ENV === 'production' ? '0.0.0.0' : (process.env.HOST || 'localhost');
 
-  // Mount routes after Firebase is initialized with appropriate rate limiting
+  // ── Bind the port FIRST so Railway's healthcheck can hit /health immediately ──
+  // Routes are mounted below after Firebase is ready; /health is already defined above.
+  const server = app.listen(PORT, HOST, () => {
+    console.log(`🚀 StockFlow backend listening on ${HOST}:${PORT}`);
+    console.log(`📡 Health: http://localhost:${PORT}/health`);
+    console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+  });
+
+  // ── Initialize Firebase (network call — can take a few seconds) ──
+  await initializeFirebase();
+
+  // ── Mount all routes now that Firebase is ready ──
   app.use('/api/devices', require('./routes/devices'));
   app.use('/api/stock', require('./routes/stock'));
-  app.use('/api', require('./routes/read')); // Handles /api/inventory and /api/activity
-  
-  // Strict rate limiting for sensitive endpoints
+  app.use('/api', require('./routes/read'));
   app.use('/api/admin', strictLimiter, require('./routes/admin'));
   app.use('/api/billing', strictLimiter, require('./routes/billing'));
-  
-  // Standard rate limiting for notification endpoints
   app.use('/api/fcm', require('./routes/fcm'));
   app.use('/api/notify', require('./routes/notify'));
   app.use('/api/stock-take', require('./routes/stockTake'));
@@ -146,19 +142,10 @@ const startServer = async () => {
   app.use('/api/pos', require('./routes/pos'));
   app.use('/api/priority', require('./routes/priority'));
 
-  // Error handler middleware - prevents information disclosure in production
+  // Error handler
   app.use((err, req, res, next) => {
-    // Log full error details server-side for debugging
-    console.error('Error Details:', {
-      message: err.message,
-      stack: err.stack,
-      path: req.path,
-      method: req.method,
-      ip: req.ip
-    });
-    
+    console.error('Error Details:', { message: err.message, stack: err.stack, path: req.path, method: req.method });
     const isDevelopment = process.env.NODE_ENV === 'development';
-    
     res.status(err.status || 500).json({
       error: {
         message: isDevelopment ? err.message : 'Internal Server Error',
@@ -170,80 +157,23 @@ const startServer = async () => {
 
   // 404 handler
   app.use('*', (req, res) => {
-    res.status(404).json({
-      error: {
-        message: 'Route not found',
-        status: 404
-      }
-    });
+    res.status(404).json({ error: { message: 'Route not found', status: 404 } });
   });
-  
-  const PORT = process.env.PORT || 4000;
 
-  // Bind to 0.0.0.0 in production so Railway can route traffic to the container
-  const HOST = process.env.NODE_ENV === 'production' ? '0.0.0.0' : (process.env.HOST || 'localhost');
+  // ── Start Firestore listeners after routes are mounted ──
+  const firestoreListenerService = require('./services/firestoreListenerService');
+  setTimeout(() => {
+    firestoreListenerService.startListeners(false);
+  }, 2000);
 
-  const server = app.listen(PORT, HOST, () => {
-    console.log(`🚀 Inventory Backend Server running on ${HOST}:${PORT}`);
-    console.log(`📡 Health check: http://localhost:${PORT}/health`);
-    
-    // Show network access info
-    const os = require('os');
-    const interfaces = os.networkInterfaces();
-    Object.keys(interfaces).forEach(interfaceName => {
-      interfaces[interfaceName].forEach(interfaceInfo => {
-        if (interfaceInfo.family === 'IPv4' && !interfaceInfo.internal) {
-          console.log(`🌐 Network access: http://${interfaceInfo.address}:${PORT}`);
-        }
-      });
-    });
-    console.log(`🔥 Firebase Admin initialized`);
-    console.log(`📱 FCM integration active`);
-    console.log(`🔗 Zoho Books integration active`);
-    console.log(`firestore listeners starting...`);
-    console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-    console.log(`
-📋 Available FCM endpoints:
-`);
-    console.log(`   POST /api/fcm/test-notify/:userId - Send test notification`);
-    console.log(`   POST /api/fcm/send-to-user - Send notification to specific user`);
-    console.log(`   POST /api/fcm/send-to-organization - Send notification to all users`);
-    console.log(`   GET  /api/fcm/stats/:orgId - Get notification statistics`);
-    console.log(`   GET  /api/fcm/test-examples - View API usage examples`);
-    console.log(`
-🔗 Available Zoho Books endpoints:
-`);
-    console.log(`   GET  /api/zoho/test - Test Zoho Books connection`);
-    console.log(`   GET  /api/zoho/items - Get all items from Zoho`);
-    console.log(`   POST /api/zoho/items - Create item in Zoho`);
-    console.log(`   PUT  /api/zoho/items/:id - Update item in Zoho`);
-    console.log(`   POST /api/zoho/items/:id/adjust-stock - Adjust item stock`);
-    console.log(`   POST /api/zoho/sync/items - Bulk sync items to Zoho`);
-    console.log(`   GET  /api/zoho/organization - Get organization info
-`);
-    console.log(`
-🛒 Available POS endpoints:
-`);
-    console.log(`   GET  /api/pos/providers - List supported POS providers`);
-    console.log(`   POST /api/pos/connect - Connect to a POS system`);
-    console.log(`   POST /api/pos/disconnect - Disconnect POS integration`);
-    console.log(`   GET  /api/pos/test - Test POS connection`);
-    console.log(`   GET  /api/pos/status - Get POS integration status`);
-    console.log(`   GET  /api/pos/items - Fetch items from POS
-`);
-  });
+  console.log('✅ All routes mounted. Firebase + FCM active.');
 
   // Graceful shutdown
   const gracefulShutdown = (signal) => {
-    console.log(`
-🛑 Received ${signal}. Starting graceful shutdown...`);
-    
-    // Stop Firestore listeners
+    console.log(`🛑 ${signal} received — shutting down...`);
     firestoreListenerService.stopListeners();
-    
-    // Close server
     server.close(() => {
-      console.log('✅ Server closed successfully');
+      console.log('✅ Server closed');
       process.exit(0);
     });
     
