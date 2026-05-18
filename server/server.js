@@ -59,13 +59,23 @@ app.use('/api/', generalLimiter);
 // Initialize Firebase Admin
 const initializeFirebase = async () => {
   try {
-    const serviceAccount = require(process.env.FIREBASE_SERVICE_ACCOUNT_PATH);
-    
+    let serviceAccount;
+
+    if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+      // Production (Railway): credentials supplied as a JSON string env var
+      serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+    } else if (process.env.FIREBASE_SERVICE_ACCOUNT_PATH) {
+      // Local dev: credentials loaded from a file
+      serviceAccount = require(process.env.FIREBASE_SERVICE_ACCOUNT_PATH);
+    } else {
+      throw new Error('No Firebase credentials supplied. Set FIREBASE_SERVICE_ACCOUNT_JSON or FIREBASE_SERVICE_ACCOUNT_PATH.');
+    }
+
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount),
       databaseURL: process.env.FIREBASE_DATABASE_URL
     });
-    
+
     console.log('✅ Firebase Admin initialized successfully');
   } catch (error) {
     console.error('❌ Firebase Admin initialization failed:', error.message);
@@ -164,9 +174,10 @@ const startServer = async () => {
   });
   
   const PORT = process.env.PORT || 4000;
-  
-  const HOST = process.env.HOST || 'localhost';
-  
+
+  // Bind to 0.0.0.0 in production so Railway can route traffic to the container
+  const HOST = process.env.NODE_ENV === 'production' ? '0.0.0.0' : (process.env.HOST || 'localhost');
+
   const server = app.listen(PORT, HOST, () => {
     console.log(`🚀 Inventory Backend Server running on ${HOST}:${PORT}`);
     console.log(`📡 Health check: http://localhost:${PORT}/health`);
