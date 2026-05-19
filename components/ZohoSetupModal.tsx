@@ -55,7 +55,9 @@ const ZohoSetupModal: React.FC<ZohoSetupModalProps> = ({ isOpen, onClose, orgId,
             setClientId(data.config.clientId || '');
             setZohoOrgId(data.config.zohoOrgId || '');
             setRegion(data.config.region || 'us');
-            setRedirectUri(data.config.redirectUri || DEFAULT_REDIRECT_URL);
+            // Replace any saved localhost URL with the current production URL
+            const savedUri = data.config.redirectUri || DEFAULT_REDIRECT_URL;
+            setRedirectUri(savedUri.includes('localhost') ? DEFAULT_REDIRECT_URL : savedUri);
             // Never pre-fill the secret for security — user must re-enter to change
           }
         }

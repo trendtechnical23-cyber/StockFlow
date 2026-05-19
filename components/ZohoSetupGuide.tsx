@@ -38,8 +38,8 @@ const ZohoSetupGuide: React.FC = () => {
                         <li>Fill in the details:
                             <ul className="list-disc list-inside ml-4 mt-1 space-y-1">
                                 <li><strong>Client Name:</strong> StockFlow Dashboard</li>
-                                <li><strong>Homepage URL:</strong> http://localhost:3001</li>
-                                <li><strong>Redirect URI:</strong> http://localhost:4000/callback/zoho</li>
+                                <li><strong>Homepage URL:</strong> https://stockflow-dashboard-a1aa6.web.app</li>
+                                <li><strong>Redirect URI:</strong> https://stockflow-production-3876.up.railway.app/callback/zoho</li>
                             </ul>
                         </li>
                         <li>Copy your Client ID and Client Secret</li>
