@@ -2,8 +2,12 @@ const { messaging, database } = require('./firebaseAdmin');
 
 async function sendNotificationToUser(userUid, title, body, data = {}) {
   try {
+    if (!database) {
+      console.warn('⚠️ Realtime Database unavailable — skipping FCM token lookup');
+      return { success: false, error: 'Realtime Database not configured' };
+    }
     console.log(`🔍 Fetching FCM token for user: ${userUid}`);
-    
+
     const tokenSnapshot = await database.ref(`deviceTokens/${userUid}`).get();
     const token = tokenSnapshot.val();
 
@@ -32,9 +36,12 @@ async function sendNotificationToUser(userUid, title, body, data = {}) {
 
 async function sendNotificationToOrg(orgId, title, body, data = {}) {
   try {
+    if (!database) {
+      console.warn('⚠️ Realtime Database unavailable — skipping org notification');
+      return { success: false, error: 'Realtime Database not configured' };
+    }
     console.log(`🏢 Sending notification to organization: ${orgId}`);
-    
-    // Get all members of the organization
+
     const membersSnapshot = await database.ref(`organizations/${orgId}/members`).get();
     const members = membersSnapshot.val();
 
