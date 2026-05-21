@@ -373,6 +373,9 @@ const LoginPage: React.FC = () => {
     let userCredential: Awaited<ReturnType<typeof createUserWithEmailAndPassword>> | null = null;
 
     try {
+      // Signal to App.tsx that a signup is in progress so it retries instead of signing out.
+      localStorage.setItem('signup_in_progress', Date.now().toString());
+
       // Step 1: Create the Firebase auth account.
       userCredential = await createUserWithEmailAndPassword(auth!, email.trim(), password);
 
@@ -417,9 +420,11 @@ const LoginPage: React.FC = () => {
 
       // Allow Firestore replication to settle before the app reads user data.
       await new Promise(resolve => setTimeout(resolve, 2000));
+      localStorage.removeItem('signup_in_progress');
 
     } catch (error: any) {
       console.error('Signup error:', error);
+      localStorage.removeItem('signup_in_progress');
 
       // If the Firebase auth account was created but Firestore failed, delete the
       // auth account so the user is NOT permanently locked out (can re-signup).

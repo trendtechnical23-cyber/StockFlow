@@ -16,7 +16,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.google.firebase.auth.FirebaseAuth
 import com.trendstock.trendmobility.services.FCMTokenManager
-import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -262,31 +261,19 @@ fun LoginScreen(
     }
 }
 
-// Helper function to cache inventory items locally for offline stock take
+// Helper function to cache inventory items locally for offline stock take.
+// Uses InventoryRepository which reads from Firestore organizations/{orgId}/inventory —
+// the same collection the web dashboard writes to.
 private suspend fun cacheInventoryItemsLocally(context: android.content.Context) {
     try {
-        val database = com.google.firebase.database.FirebaseDatabase.getInstance().reference
-        val snapshot = database.child("inventoryItems").get().await()
-        
-        val items = mutableListOf<com.trendstock.trendmobility.api.InventoryItem>()
-        snapshot.children.forEach { child ->
-            try {
-                val item = child.getValue(com.trendstock.trendmobility.api.InventoryItem::class.java)
-                if (item != null) {
-                    items.add(item)
-                }
-            } catch (e: Exception) {
-                android.util.Log.e("LoginScreen", "Error parsing item: ${e.message}")
-            }
+        val result = com.trendstock.trendmobility.database.InventoryRepository
+            .getInstance(context)
+            .refreshInventory(forceRefresh = true)
+        if (result.isSuccess) {
+            android.util.Log.d("LoginScreen", "📦 Inventory cached from Firestore successfully")
+        } else {
+            android.util.Log.w("LoginScreen", "⚠️ Inventory cache refresh failed: ${result.exceptionOrNull()?.message}")
         }
-        
-        // Save to SharedPreferences
-        val sharedPrefs = context.getSharedPreferences("OfflineInventory", android.content.Context.MODE_PRIVATE)
-        val json = com.google.gson.Gson().toJson(items)
-        sharedPrefs.edit().putString("cached_items", json).apply()
-        sharedPrefs.edit().putLong("cache_timestamp", System.currentTimeMillis()).apply()
-        
-        android.util.Log.d("LoginScreen", "📦 Cached ${items.size} inventory items locally")
     } catch (e: Exception) {
         android.util.Log.e("LoginScreen", "❌ Failed to cache inventory: ${e.message}")
         throw e

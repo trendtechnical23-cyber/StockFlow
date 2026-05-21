@@ -8,8 +8,7 @@ import retrofit2.converter.gson.GsonConverterFactory
 import kotlinx.coroutines.tasks.await
 
 object ApiClient {
-    // TODO: Update to production HTTPS URL before release
-    private const val BASE_URL = "http://10.0.2.2:4000/api/"
+    private const val BASE_URL = "https://stockflow-production-3876.up.railway.app/api/"
     
     private val loggingInterceptor = HttpLoggingInterceptor().apply {
         level = HttpLoggingInterceptor.Level.BASIC

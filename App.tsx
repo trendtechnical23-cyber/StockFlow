@@ -8,6 +8,7 @@ import { AppProvider } from './context/AppContext';
 import { ToastProvider } from './components/ToastProvider';
 import { User, Organization } from './types';
 import * as api from './services/apiService';
+import { API_ENDPOINTS } from './utils/apiConfig';
 import { activityLogger } from './services/activityLogger';
 import { useToast } from './hooks/useToast';
 import { useIdleTimer } from './hooks/useIdleTimer';
@@ -293,11 +294,51 @@ const AppContent: React.FC = () => {
             // Start idle timer for authenticated users
             startIdleTimer();
           } else {
-            console.log('⚠️ No user profile found - user needs to complete organization setup');
-            // This shouldn't happen in normal flow since signup creates the profile
-            // But if it does, sign out the user to restart the process
-            addToast({ message: 'Account setup incomplete. Please try signing up again.', type: 'error' });
-            if (auth) await auth.signOut();
+            console.log('⚠️ No user profile found on first attempt — checking if this is a new signup');
+
+            // New users: Firestore write may not have propagated yet when onAuthStateChanged fires.
+            // LoginPage sets 'signup_in_progress' before createUserWithEmailAndPassword so we know to retry.
+            const signupTs = localStorage.getItem('signup_in_progress');
+            const isNewUser = signupTs !== null && (Date.now() - parseInt(signupTs, 10)) < 60000;
+
+            if (isNewUser) {
+              console.log('🆕 New user detected — retrying getUserData up to 5 times with backoff');
+              setLoadingMessage('Completing account setup...');
+              let retryResult = null;
+              for (let attempt = 1; attempt <= 5; attempt++) {
+                await new Promise(r => setTimeout(r, attempt * 1000));
+                console.log(`🔄 Retry attempt ${attempt}/5`);
+                retryResult = await api.getUserData(user.uid);
+                if (retryResult) break;
+              }
+
+              localStorage.removeItem('signup_in_progress');
+              if (retryResult) {
+                const completed = retryResult.user.onboardingCompleted === true;
+                if (completed) {
+                  setOnboardingCompleted(true);
+                  localStorage.setItem('onboardingCompleted', 'true');
+                  localStorage.setItem('onboardingUid', user.uid);
+                }
+                localStorage.setItem('organizationId', retryResult.organization.id);
+                setAuthData({ user: retryResult.user, organization: retryResult.organization });
+                startIdleTimer();
+                const hasZohoConnected = retryResult.organization.integrations?.zoho?.status === 'connected';
+                if (!onboardingCompleted && !completed && retryResult.inventoryCount === 0 && !hasZohoConnected) {
+                  setNeedsOnboarding(true);
+                } else {
+                  setNeedsOnboarding(false);
+                }
+              } else {
+                console.log('❌ Profile still not found after retries — signing out');
+                addToast({ message: 'Account setup incomplete. Please try signing up again.', type: 'error' });
+                if (auth) await auth.signOut();
+              }
+            } else {
+              console.log('⚠️ Existing user with no profile — signing out');
+              addToast({ message: 'Account setup incomplete. Please try signing up again.', type: 'error' });
+              if (auth) await auth.signOut();
+            }
           }
         } catch (error: any) {
           console.error('❌ Error fetching user data:', error);
@@ -408,6 +449,22 @@ const AppContent: React.FC = () => {
     }
   }, [authData, addToast]);
 
+  const handleZohoConnectFromOnboarding = useCallback(async () => {
+    if (!authData || !firebaseUser) return;
+    try {
+      const token = await auth.currentUser?.getIdToken();
+      const response = await fetch(API_ENDPOINTS.zohoAuthUrl(authData.organization.id, firebaseUser.uid), {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || `HTTP ${response.status}`);
+      addToast({ message: 'Redirecting to Zoho Books...', type: 'info' });
+      setTimeout(() => { window.location.href = data.authUrl; }, 300);
+    } catch (err: any) {
+      addToast({ message: err.message || 'Failed to connect to Zoho', type: 'error' });
+    }
+  }, [authData, firebaseUser, addToast]);
+
   // Navigation handlers for onboarding - navigate to main app with specific view
   const handleGoogleSheetsImport = useCallback(() => {
     setNeedsOnboarding(false);
@@ -506,10 +563,11 @@ const AppContent: React.FC = () => {
     
     if (needsOnboarding) {
       return (
-        <OnboardingPage 
+        <OnboardingPage
           organizationName={authData.organization.name}
           orgId={authData.organization.id}
           onImport={handleImportFromZoho}
+          onZohoConnect={handleZohoConnectFromOnboarding}
           onStartFresh={handleOnboardingComplete}
           onGoogleSheetsImport={handleGoogleSheetsImport}
           onExcelImport={handleExcelImport}
