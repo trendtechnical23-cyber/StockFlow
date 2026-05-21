@@ -12,8 +12,8 @@
 const admin = require('firebase-admin');
 const cacheManager = require('./cacheManager');
 
-const messaging = admin.messaging();
-const firestore = admin.firestore();
+const getMessaging = () => admin.messaging();
+const getFirestore = () => admin.firestore();
 
 // Per-organization rate limiting (tokens sent per minute)
 const ORG_RATE_LIMIT = 10000; // Send to max 10,000 tokens per org per minute
@@ -148,7 +148,7 @@ class FCMTokenManager {
         const batch = tokens.slice(i, i + FCM_MULTICAST_LIMIT);
         
         try {
-          const response = await messaging.sendMulticast({
+          const response = await getMessaging().sendMulticast({
             ...message,
             tokens: batch
           }, dryRun);
@@ -224,7 +224,7 @@ class FCMTokenManager {
       }
 
       // Send to user's tokens
-      const response = await messaging.sendMulticast({
+      const response = await getMessaging().sendMulticast({
         ...message,
         tokens
       }, dryRun);
@@ -246,7 +246,7 @@ class FCMTokenManager {
 
       console.log(`🧹 Pruning ${invalidTokens.length} invalid tokens from org=${orgId}`);
 
-      const batch = firestore.batch();
+      const batch = getFirestore().batch();
       
       for (const token of invalidTokens) {
         const docRef = firestore

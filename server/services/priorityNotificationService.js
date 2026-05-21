@@ -1,15 +1,15 @@
 const admin = require('firebase-admin');
 const fcmService = require('./fcmService');
 
-const db = admin.firestore();
+const getDb = () => admin.firestore();
 
 async function checkAndNotify() {
   console.log('Checking priority item stock levels...');
-  const orgsSnapshot = await db.collection('organizations').get();
+  const orgsSnapshot = await getDb().collection('organizations').get();
 
   for (const orgDoc of orgsSnapshot.docs) {
     const orgId = orgDoc.id;
-    const priorityItemsSnapshot = await db.collection(`organizations/${orgId}/priorityItems`).get();
+    const priorityItemsSnapshot = await getDb().collection(`organizations/${orgId}/priorityItems`).get();
 
     if (priorityItemsSnapshot.empty) {
       continue;
@@ -17,7 +17,7 @@ async function checkAndNotify() {
 
     for (const priorityDoc of priorityItemsSnapshot.docs) {
       const priorityItem = priorityDoc.data();
-      const inventoryItemRef = db.collection(`organizations/${orgId}/inventory`).doc(priorityItem.itemId);
+      const inventoryItemRef = getDb().collection(`organizations/${orgId}/inventory`).doc(priorityItem.itemId);
       const inventoryItemDoc = await inventoryItemRef.get();
 
       if (inventoryItemDoc.exists) {

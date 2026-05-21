@@ -161,6 +161,17 @@ setTimeout(() => {
   }
 }, 3000);
 
+// ── Global safety net — log but don't die on unhandled async errors ───────────
+// Node.js 20 terminates on unhandled rejections by default. Any async Firestore
+// listener callback that throws without a catch becomes one of these. Logging
+// here gives us a stack trace in Railway logs while keeping the server alive.
+process.on('unhandledRejection', (reason) => {
+  console.error('⚠️ Unhandled promise rejection (server kept alive):', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('⚠️ Uncaught exception (server kept alive):', err.message, err.stack);
+});
+
 // ── Graceful shutdown ─────────────────────────────────────────────────────────
 const gracefulShutdown = (signal) => {
   console.log(`🛑 ${signal} — shutting down`);

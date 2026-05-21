@@ -80,6 +80,7 @@ class FirestoreListenerService {
         const unsubscribe = this.db
             .collection('activities')
             .onSnapshot(async (snapshot) => {
+                try {
                 for (const change of snapshot.docChanges()) {
                     if (change.type === 'added') {
                         const data = change.doc.data();
@@ -189,6 +190,9 @@ class FirestoreListenerService {
                         }
                     }
                 }
+                } catch (err) {
+                    console.error('⚠️ Activities listener callback error (non-fatal):', err.message);
+                }
             }, (error) => {
                 console.error('❌ Activities listener error:', error.message);
             });
@@ -212,6 +216,7 @@ class FirestoreListenerService {
                 .orderBy('timestamp', 'desc')
                 .limit(1)
                 .onSnapshot(async (snapshot) => {
+                    try {
                     for (const change of snapshot.docChanges()) {
                         if (change.type === 'added') {
                             // Log only — do NOT send FCM here (avoids duplicate notifications)
@@ -222,6 +227,7 @@ class FirestoreListenerService {
                             }
                         }
                     }
+                    } catch (err) { console.error(`⚠️ Activity log callback error (non-fatal):`, err.message); }
                 }, (error) => {
                     console.error(`❌ Activity log listener error for org ${orgId} (${rootCollection}):`, error.message);
                 });
@@ -245,11 +251,13 @@ class FirestoreListenerService {
                 .orderBy('timestamp', 'desc')
                 .limit(1)
                 .onSnapshot(async (snapshot) => {
+                    try {
                     for (const change of snapshot.docChanges()) {
                         if (change.type === 'added') {
                             await this.handleAuditLog(change.doc.data(), orgId);
                         }
                     }
+                    } catch (err) { console.error(`⚠️ Audit log callback error (non-fatal):`, err.message); }
                 }, (error) => {
                     console.error(`❌ Audit log listener error for org ${orgId} (${rootCollection}):`, error.message);
                 });
@@ -270,11 +278,13 @@ class FirestoreListenerService {
                 .doc(orgId)
                 .collection('inventory')
                 .onSnapshot(async (snapshot) => {
+                    try {
                     for (const change of snapshot.docChanges()) {
                         if (change.type === 'modified') {
                             await this.handleInventoryChange(change.doc.data(), change.doc.id, orgId, change.oldIndex, change.newIndex);
                         }
                     }
+                    } catch (err) { console.error(`⚠️ Inventory listener callback error (non-fatal):`, err.message); }
                 }, (error) => {
                     console.error(`❌ Inventory listener error for org ${orgId} (${rootCollection}):`, error.message);
                 });
@@ -296,11 +306,13 @@ class FirestoreListenerService {
                 .collection('inventory')
                 .where('quantity', '<=', 10) // Configurable threshold
                 .onSnapshot(async (snapshot) => {
+                    try {
                     for (const change of snapshot.docChanges()) {
                         if (change.type === 'added' || change.type === 'modified') {
                             await this.handleLowStockAlert(change.doc.data(), change.doc.id, orgId);
                         }
                     }
+                    } catch (err) { console.error(`⚠️ Low stock listener callback error (non-fatal):`, err.message); }
                 }, (error) => {
                     console.error(`❌ Low stock listener error for org ${orgId} (${rootCollection}):`, error.message);
                 });

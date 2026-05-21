@@ -1,6 +1,6 @@
 const admin = require('firebase-admin');
 
-const db = admin.firestore();
+const getDb = () => admin.firestore();
 
 /**
  * Clean invalid device tokens from Firestore based on FCM send results
@@ -52,12 +52,12 @@ const cleanInvalidTokens = async (orgId, multicastResult, tokens) => {
     console.log(`🗑️ Found ${invalidTokens.length} invalid tokens for org: ${orgId}`);
 
     // Remove invalid tokens from Firestore in batch
-    const batch = db.batch();
+    const batch = getDb().batch();
     const removalErrors = [];
 
     for (const invalidToken of invalidTokens) {
       try {
-        const tokenDocRef = db.collection('organizations').doc(orgId).collection('deviceTokens').doc(invalidToken.token);
+        const tokenDocRef = getDb().collection('organizations').doc(orgId).collection('deviceTokens').doc(invalidToken.token);
         batch.delete(tokenDocRef);
         
         console.log(`🗑️ Marked for removal: Token ending in ...${invalidToken.token.slice(-8)} (${invalidToken.error})`);
@@ -104,7 +104,7 @@ const cleanSingleInvalidToken = async (orgId, token, errorCode = 'unknown-error'
       throw new Error('orgId and token are required');
     }
 
-    const tokenDocRef = db.collection('organizations').doc(orgId).collection('deviceTokens').doc(token);
+    const tokenDocRef = getDb().collection('organizations').doc(orgId).collection('deviceTokens').doc(token);
     const tokenDoc = await tokenDocRef.get();
 
     if (!tokenDoc.exists) {
@@ -138,7 +138,7 @@ const getTokenStats = async (orgId) => {
       throw new Error('orgId is required');
     }
 
-    const tokensSnapshot = await db.collection('organizations').doc(orgId).collection('deviceTokens').get();
+    const tokensSnapshot = await getDb().collection('organizations').doc(orgId).collection('deviceTokens').get();
     
     const stats = {
       total: tokensSnapshot.size,

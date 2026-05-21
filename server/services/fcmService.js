@@ -8,9 +8,12 @@ const admin = require('firebase-admin');
 
 class FCMService {
     constructor() {
-        this.db = admin.firestore();
-        this.messaging = admin.messaging();
+        this._db = null;
+        this._messaging = null;
     }
+
+    get db() { if (!this._db) this._db = admin.firestore(); return this._db; }
+    get messaging() { if (!this._messaging) this._messaging = admin.messaging(); return this._messaging; }
 
     /**
      * Send notification to a specific user by userId
