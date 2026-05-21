@@ -12,28 +12,25 @@ const app = express();
 // ── Middleware ────────────────────────────────────────────────────────────────
 app.use(helmet());
 
-const getAllowedOrigins = () => {
-  const origins = [
+const buildAllowedOrigins = () => {
+  const origins = new Set([
     'http://localhost:3000',
     'http://localhost:3001',
     'http://localhost:5173',
-    // Production Firebase Hosting domains — always allowed
     'https://stockflow-dashboard-a1aa6.web.app',
     'https://stockflow-dashboard-a1aa6.firebaseapp.com',
-  ];
-  // Additional origins from env vars (both supported, comma-separated)
+  ]);
   [process.env.CLIENT_URL, process.env.CORS_ORIGINS].forEach(envVal => {
-    if (envVal) envVal.split(',').map(u => u.trim()).filter(Boolean).forEach(u => origins.push(u));
+    if (envVal) envVal.split(',').map(u => u.trim()).filter(Boolean).forEach(u => origins.add(u));
   });
-  return origins;
+  return [...origins];
 };
+
+const allowedOrigins = buildAllowedOrigins();
+console.log('🌐 CORS allowed origins:', allowedOrigins);
+
 app.use(cors({
-  origin: (origin, callback) => {
-    // Allow requests with no origin (mobile apps, curl, Postman)
-    if (!origin) return callback(null, true);
-    if (getAllowedOrigins().includes(origin)) return callback(null, true);
-    callback(new Error(`CORS: origin ${origin} not allowed`));
-  },
+  origin: allowedOrigins,
   credentials: true,
 }));
 app.use(morgan('combined'));
@@ -44,8 +41,15 @@ const generalLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 200, standardH
 const strictLimiter  = rateLimit({ windowMs: 15 * 60 * 1000, max: 20,  standardHeaders: true, legacyHeaders: false });
 app.use('/api/', generalLimiter);
 
-// ── Health check — defined first, always responds ─────────────────────────────
+// ── Health check — always responds, explicit CORS so it works before any auth ──
 app.get('/health', (req, res) => {
+  const origin = req.headers.origin;
+  if (origin && allowedOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  } else {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  }
+  res.setHeader('Vary', 'Origin');
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
