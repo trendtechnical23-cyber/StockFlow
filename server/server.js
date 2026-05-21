@@ -83,25 +83,58 @@ let firebaseReady = false;
 
 console.log('[6] Initialising Firebase Admin...');
 try {
-  let serviceAccount;
+  let credential;
 
-  if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
-    // Normalise both literal \n sequences stored by Railway and actual newlines
-    const raw = process.env.FIREBASE_SERVICE_ACCOUNT_JSON.replace(/\\n/g, '\n');
-    serviceAccount = JSON.parse(raw);
+  if (process.env.FIREBASE_PRIVATE_KEY) {
+    // ── Preferred: individual vars (Railway-safe, no JSON parsing needed) ──────
+    // Set FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY
+    // in Railway Variables. Railway stores each value cleanly without JSON issues.
+    console.log('[6a] Using individual FIREBASE_* env vars');
+    credential = admin.credential.cert({
+      projectId:   process.env.FIREBASE_PROJECT_ID,
+      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+      privateKey:  process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+    });
+
+  } else if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+    // ── Fallback: full JSON blob — try two parse strategies ───────────────────
+    // Railway sometimes embeds raw newline characters (ASCII 10) inside JSON
+    // string values, which is illegal JSON and causes "Bad control character"
+    // errors. We try the raw string first, then escape embedded newlines.
+    console.log('[6a] Parsing FIREBASE_SERVICE_ACCOUNT_JSON...');
+    let serviceAccount;
+    const raw = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+
+    try {
+      // Strategy 1: simple — replace literal \n text with real newlines
+      serviceAccount = JSON.parse(raw.replace(/\\n/g, '\n'));
+    } catch (_) {
+      // Strategy 2: escape ALL actual newline/carriage-return chars that are
+      // embedded inside the JSON string (Railway's broken storage format)
+      const escaped = raw
+        .replace(/\r\n/g, '\\n')   // CRLF → escaped \n
+        .replace(/\n/g, '\\n')     // LF   → escaped \n
+        .replace(/\r/g, '\\n');    // CR   → escaped \n
+      serviceAccount = JSON.parse(escaped);
+    }
+
+    // After parsing, private_key may still have literal \n text — normalise
     if (serviceAccount.private_key) {
       serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
     }
+    credential = admin.credential.cert(serviceAccount);
+
   } else {
+    // ── Last resort: key file on disk ─────────────────────────────────────────
     const path = require('path');
     const keyPath = process.env.FIREBASE_SERVICE_ACCOUNT_PATH || path.resolve('./firebase-admin-key.json');
     console.log('[6a] Loading service account from file:', keyPath);
-    serviceAccount = require(keyPath);
+    credential = admin.credential.cert(require(keyPath));
   }
 
   if (!admin.apps.length) {
     admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
+      credential,
       databaseURL: process.env.FIREBASE_DATABASE_URL,
     });
   }
@@ -110,6 +143,7 @@ try {
   console.log('[7] Firebase Admin initialised successfully');
 } catch (err) {
   console.error('[7] Firebase init failed (server keeps running):', err.message);
+  console.error('[7] Tip: set FIREBASE_PROJECT_ID + FIREBASE_CLIENT_EMAIL + FIREBASE_PRIVATE_KEY in Railway Variables');
 }
 
 // ── Mount API routes ──────────────────────────────────────────────────────────
