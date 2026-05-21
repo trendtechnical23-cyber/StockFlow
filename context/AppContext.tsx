@@ -1075,8 +1075,9 @@ export const AppProvider: React.FC<{ children: ReactNode, user: User, organizati
     const handleAddUser = useCallback(async (userData: Omit<User, 'organizationId' | 'uid'>, password?: string) => {
         try {
             const newUser = await api.createUserWithOrganization(userData, state.currentOrganization.id, password);
-            dispatch({ type: 'ADD_USER', payload: newUser });
-            dispatch({ type: 'ADD_LOG', payload: { 
+            // Don't dispatch ADD_USER — the Firestore realtime listener will fire and
+            // call SET_USERS with the authoritative list, preventing duplicates.
+            dispatch({ type: 'ADD_LOG', payload: {
                 user: state.currentUser.name || state.currentUser.email, 
                 action: 'Created New User',
                 details: newUser.email

@@ -8,12 +8,17 @@ const fcmService = require('./fcmService');
 
 class FirestoreListenerService {
     constructor() {
-        this.db = admin.firestore();
+        this._db = null;
         this.listeners = new Map(); // Store active listeners
         this.isListening = false;
         this.serverStartTime = Date.now(); // Track when server started to avoid old notifications
         this.processedActivities = new Set(); // Track processed activities to prevent duplicates
         console.log('🕒 Firestore Listener Service initialized - Start time:', new Date(this.serverStartTime).toISOString());
+    }
+
+    get db() {
+        if (!this._db) this._db = admin.firestore();
+        return this._db;
     }
 
     /**

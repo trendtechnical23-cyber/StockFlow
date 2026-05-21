@@ -4,7 +4,7 @@ const { verifyFirebaseToken, requireOrg } = require('../middleware/auth');
 const { sendStockActivityNotification } = require('../sendNotification');
 
 const router = express.Router();
-const db = admin.firestore();
+const getDb = () => admin.firestore();
 
 /**
  * POST /api/stock/update
@@ -33,9 +33,9 @@ router.post('/update', verifyFirebaseToken, requireOrg('orgId'), async (req, res
     }
 
     // Use Firestore transaction for atomicity
-    const updatedItem = await db.runTransaction(async (transaction) => {
-      const inventoryDocRef = db.collection('organizations').doc(orgId).collection('inventory').doc(itemId);
-      const activityLogRef = db.collection('organizations').doc(orgId).collection('activityLogs').doc();
+    const updatedItem = await getDb().runTransaction(async (transaction) => {
+      const inventoryDocRef = getDb().collection('organizations').doc(orgId).collection('inventory').doc(itemId);
+      const activityLogRef = getDb().collection('organizations').doc(orgId).collection('activityLogs').doc();
 
       // Get current inventory item
       const inventoryDoc = await transaction.get(inventoryDocRef);
@@ -123,7 +123,7 @@ router.post('/update', verifyFirebaseToken, requireOrg('orgId'), async (req, res
       transaction.set(activityLogRef, activityData);
 
       // Also create a frontend-compatible notification in Firestore
-      const notificationRef = db.collection('organizations').doc(orgId).collection('notifications').doc();
+      const notificationRef = getDb().collection('organizations').doc(orgId).collection('notifications').doc();
       const notificationData = {
         type: 'stock',
         title: 'Stock Updated (API)',

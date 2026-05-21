@@ -3,7 +3,7 @@ const admin = require('firebase-admin');
 const { verifyFirebaseToken, requireOrg } = require('../middleware/auth');
 
 const router = express.Router();
-const db = admin.firestore();
+const getDb = () => admin.firestore();
 
 /**
  * GET /api/inventory/:orgId
@@ -46,14 +46,14 @@ router.get('/inventory/:orgId', verifyFirebaseToken, requireOrg('orgId'), async 
       });
     }
 
-    let query = db.collection('organizations').doc(orgId).collection('inventory')
+    let query = getDb().collection('organizations').doc(orgId).collection('inventory')
       .orderBy(orderBy, order)
       .limit(limitNum);
 
     // Handle pagination with startAfter
     if (startAfter) {
       try {
-        const startAfterDoc = await db.collection('organizations').doc(orgId).collection('inventory').doc(startAfter).get();
+        const startAfterDoc = await getDb().collection('organizations').doc(orgId).collection('inventory').doc(startAfter).get();
         if (startAfterDoc.exists) {
           query = query.startAfter(startAfterDoc);
         }
@@ -133,14 +133,14 @@ router.get('/activity/:orgId', verifyFirebaseToken, requireOrg('orgId'), async (
       });
     }
 
-    let query = db.collection('organizations').doc(orgId).collection('activityLogs')
+    let query = getDb().collection('organizations').doc(orgId).collection('activityLogs')
       .orderBy('timestamp', 'desc')
       .limit(limitNum);
 
     // Handle pagination with startAfter
     if (startAfter) {
       try {
-        const startAfterDoc = await db.collection('organizations').doc(orgId).collection('activityLogs').doc(startAfter).get();
+        const startAfterDoc = await getDb().collection('organizations').doc(orgId).collection('activityLogs').doc(startAfter).get();
         if (startAfterDoc.exists) {
           query = query.startAfter(startAfterDoc);
         }

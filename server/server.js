@@ -104,18 +104,31 @@ const initFirebase = () => {
 
 initFirebase();
 
-// ── Mount API routes (only work once Firebase is ready) ───────────────────────
-app.use('/api/devices',                    require('./routes/devices'));
-app.use('/api/stock',                      require('./routes/stock'));
-app.use('/api',                            require('./routes/read'));
-app.use('/api/admin',    strictLimiter,    require('./routes/admin'));
-app.use('/api/billing',  strictLimiter,    require('./routes/billing'));
-app.use('/api/fcm',                        require('./routes/fcm'));
-app.use('/api/notify',                     require('./routes/notify'));
-app.use('/api/stock-take',                 require('./routes/stockTake'));
-app.use('/api/zoho',                       require('./routes/zoho'));
-app.use('/api/pos',                        require('./routes/pos'));
-app.use('/api/priority',                   require('./routes/priority'));
+// ── Mount API routes ──────────────────────────────────────────────────────────
+// safeMount wraps require() in a try-catch so a route file that crashes at load
+// time (e.g. because Firebase init failed) returns 503 instead of killing the
+// server process and taking /health down with it.
+const safeMount = (path, routeFile, ...middlewares) => {
+  try {
+    const router = require(routeFile);
+    app.use(path, ...middlewares, router);
+  } catch (err) {
+    console.error(`⚠️  Failed to load route ${routeFile} — mounting 503 handler:`, err.message);
+    app.use(path, (req, res) => res.status(503).json({ error: { message: 'Service temporarily unavailable', status: 503 } }));
+  }
+};
+
+safeMount('/api/devices',   './routes/devices');
+safeMount('/api/stock',     './routes/stock');
+safeMount('/api',           './routes/read');
+safeMount('/api/admin',     './routes/admin',   strictLimiter);
+safeMount('/api/billing',   './routes/billing', strictLimiter);
+safeMount('/api/fcm',       './routes/fcm');
+safeMount('/api/notify',    './routes/notify');
+safeMount('/api/stock-take','./routes/stockTake');
+safeMount('/api/zoho',      './routes/zoho');
+safeMount('/api/pos',       './routes/pos');
+safeMount('/api/priority',  './routes/priority');
 
 // ── Error handler ─────────────────────────────────────────────────────────────
 app.use((err, req, res, next) => {

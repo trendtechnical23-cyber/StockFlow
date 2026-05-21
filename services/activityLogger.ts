@@ -7,10 +7,13 @@ import { addLogAPI } from './apiService';
  * Logs all user actions for accountability and compliance
  */
 
+export type AuditSeverity = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+
 export interface ActivityLogData {
   action: string;
   category: 'USER_MANAGEMENT' | 'ORGANIZATION' | 'INVENTORY' | 'SETTINGS' | 'AUTHENTICATION' | 'SYSTEM';
   description: string;
+  severity?: AuditSeverity;
   targetType?: 'user' | 'organization' | 'item' | 'setting' | 'role';
   targetId?: string;
   targetName?: string;
@@ -36,6 +39,7 @@ class ActivityLogger {
         action: data.action || 'Unknown Action',
         category: data.category,
         description: data.description || 'No description available',
+        severity: data.severity || 'LOW',
         userId: currentUser.uid,
         userName: currentUser.displayName || currentUser.email || 'Unknown User',
         userRole: 'user', // Default role - could be enhanced

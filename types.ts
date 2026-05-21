@@ -113,6 +113,8 @@ export interface User {
     invitedAt?: string;
     onboardingCompleted?: boolean;
     themePreference?: 'light' | 'dark';
+    savedNotificationSettings?: NotificationSettings;
+    savedAnalyticsSettings?: { autoRefresh: boolean; refreshInterval: number; showAdvancedMetrics: boolean };
 }
 
 // Legacy InventoryItem - extends Firebase version for backward compatibility

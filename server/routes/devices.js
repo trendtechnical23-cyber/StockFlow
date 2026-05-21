@@ -4,7 +4,7 @@ const { verifyFirebaseToken, requireOrg } = require('../middleware/auth');
 const notifications = require('../services/notifications');
 
 const router = express.Router();
-const db = admin.firestore();
+const getDb = () => admin.firestore();
 const firestoreListenerService = require('../services/firestoreListenerService');
 
 /**
@@ -55,7 +55,7 @@ router.post('/register', verifyFirebaseToken, async (req, res) => {
     }
 
     // Save device token to Firestore
-    const tokenDocRef = db.collection('organizations').doc(orgId).collection('deviceTokens').doc(deviceToken);
+    const tokenDocRef = getDb().collection('organizations').doc(orgId).collection('deviceTokens').doc(deviceToken);
     
     await tokenDocRef.set({
       token: deviceToken,
@@ -146,7 +146,7 @@ router.post('/unregister', verifyFirebaseToken, async (req, res) => {
     }
 
     // Check if token exists and belongs to the user
-    const tokenDocRef = db.collection('organizations').doc(orgId).collection('deviceTokens').doc(deviceToken);
+    const tokenDocRef = getDb().collection('organizations').doc(orgId).collection('deviceTokens').doc(deviceToken);
     const tokenDoc = await tokenDocRef.get();
 
     if (!tokenDoc.exists) {

@@ -5,8 +5,7 @@ const crypto = require('crypto');
 const axios = require('axios');
 const { verifyFirebaseToken } = require('../middleware/auth');
 
-// Get Firestore instance
-const db = admin.firestore();
+const getDb = () => admin.firestore();
 
 // PayFast configuration from environment variables (NO FALLBACKS FOR SECURITY)
 const PAYFAST_MERCHANT_ID = process.env.PAYFAST_MERCHANT_ID;
@@ -163,7 +162,7 @@ router.post('/payfast/itn', requirePayFast, async (req, res) => {
     // 4. Check idempotency — prevent duplicate processing of same payment
     const paymentId = data.pf_payment_id;
     if (paymentId) {
-      const existingPayment = await db.collection('activities')
+      const existingPayment = await getDb().collection('activities')
         .where('type', '==', 'billing')
         .where('details', '==', `Subscription for ${plan} plan successful. Payment ID: ${paymentId}`)
         .limit(1)
@@ -176,7 +175,7 @@ router.post('/payfast/itn', requirePayFast, async (req, res) => {
     }
 
     // 5. Verify organization exists
-    const orgRef = db.collection('organizations').doc(organizationId);
+    const orgRef = getDb().collection('organizations').doc(organizationId);
     const orgDoc = await orgRef.get();
     if (!orgDoc.exists) {
       console.error(`❌ PayFast ITN: Organization ${organizationId} not found`);
@@ -196,7 +195,7 @@ router.post('/payfast/itn', requirePayFast, async (req, res) => {
         }
       }, { merge: true });
 
-      await db.collection('activities').add({
+      await getDb().collection('activities').add({
         type: 'billing',
         action: 'subscription_payment',
         organizationId,
@@ -221,7 +220,7 @@ router.post('/payfast/itn', requirePayFast, async (req, res) => {
 router.get('/validate/:organizationId', verifyFirebaseToken, async (req, res) => {
   try {
     const { organizationId } = req.params;
-    const orgDoc = await db.collection('organizations').doc(organizationId).get();
+    const orgDoc = await getDb().collection('organizations').doc(organizationId).get();
 
     if (!orgDoc.exists) {
       return res.status(404).json({ error: 'Organization not found' });
@@ -249,7 +248,7 @@ router.post('/cancel-subscription', verifyFirebaseToken, requirePayFast, async (
     // In a real PayFast setup, you might call their API to cancel recurring billing
     // For this implementation, we mark it as cancelling in our DB
     
-    await db.collection('organizations').doc(organizationId).update({
+    await getDb().collection('organizations').doc(organizationId).update({
       'subscription.status': 'cancelling',
       'subscription.updatedAt': admin.firestore.FieldValue.serverTimestamp()
     });
@@ -266,7 +265,7 @@ router.post('/cancel-subscription', verifyFirebaseToken, requirePayFast, async (
 router.get('/history/:organizationId', verifyFirebaseToken, requirePayFast, async (req, res) => {
   try {
     const { organizationId } = req.params;
-    const activities = await db.collection('activities')
+    const activities = await getDb().collection('activities')
       .where('organizationId', '==', organizationId)
       .where('type', '==', 'billing')
       .orderBy('timestamp', 'desc')
