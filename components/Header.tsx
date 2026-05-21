@@ -3,6 +3,7 @@ import { useAppContext } from '../context/AppContext';
 import useNotifications from '../hooks/useNotifications';
 import SessionStatus from './SessionStatus';
 import { BackendStatus } from './BackendStatus';
+import { playNotificationSound, unlockAudio } from '../utils/notificationSounds';
 
 const LogoutIcon = () => (
     <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>
@@ -19,6 +20,11 @@ const Header: React.FC<HeaderProps> = ({ onLogout, isUserActive = true }) => {
   const [showNotifications, setShowNotifications] = useState(false);
   const notificationRef = useRef<HTMLDivElement>(null);
   const displayName = currentUser?.name || currentUser?.email || 'User';
+
+  // Unlock audio playback on first user interaction (defeats browser autoplay policy)
+  useEffect(() => {
+    unlockAudio();
+  }, []);
 
   // Click outside handler
   useEffect(() => {
@@ -37,44 +43,64 @@ const Header: React.FC<HeaderProps> = ({ onLogout, isUserActive = true }) => {
     };
   }, [showNotifications]);
 
-  // Track shown notifications to prevent duplicates
+  // Track which notification IDs we've already processed (sound + browser popup).
+  // Seeded with all IDs present on the FIRST load so we only react to genuinely
+  // new notifications, not the historical batch that arrives on mount.
   const [shownNotificationIds, setShownNotificationIds] = useState<Set<string>>(new Set());
+  const initialLoadDone = useRef(false);
 
-  // Add browser notification when new notifications arrive
+  // Play sound and show browser notification when new notifications arrive
   useEffect(() => {
-    if (notifications.length > 0) {
-      const latestNotification = notifications[0];
-      
-      // Check if this is a new unread notification that hasn't been shown
-      if (!latestNotification.read && 
-          latestNotification.id && 
-          !shownNotificationIds.has(latestNotification.id) &&
-          'Notification' in window) {
-        
-        // Mark as shown to prevent duplicates
-        setShownNotificationIds(prev => new Set(prev).add(latestNotification.id!));
-        
-        console.log('🔔 Showing browser notification:', latestNotification.title);
-        
-        // Request permission if not granted
+    if (notifications.length === 0) return;
+
+    // On first load: silently seed the set with all existing IDs so we don't
+    // play sounds for notifications the user already received earlier.
+    if (!initialLoadDone.current) {
+      initialLoadDone.current = true;
+      const existingIds = new Set(
+        notifications.map(n => n.id).filter(Boolean) as string[]
+      );
+      setShownNotificationIds(existingIds);
+      return; // Don't play anything for the initial batch
+    }
+
+    const latestNotification = notifications[0];
+
+    // Only act on genuinely new, unread notifications
+    if (
+      !latestNotification.read &&
+      latestNotification.id &&
+      !shownNotificationIds.has(latestNotification.id)
+    ) {
+      // Mark as processed immediately to prevent double-play on re-render
+      setShownNotificationIds(prev => new Set(prev).add(latestNotification.id!));
+
+      // Resolve the sound type, with sub-event support for stock_take_session
+      const notifType  = (latestNotification as any).type ?? 'general';
+      // metadata.eventType for AppContext notifications; top-level eventType for APK Firestore notifications
+      const eventType  = (latestNotification as any).metadata?.eventType
+                      ?? (latestNotification as any).eventType as string | undefined;
+
+      playNotificationSound(notifType, eventType);
+      console.log('🔔 New notification sound:', notifType, eventType ?? '', '—', latestNotification.title);
+
+      // Browser OS notification popup.
+      // silent: true suppresses the OS default sound so ONLY our custom
+      // playNotificationSound() audio is heard (otherwise they'd double up,
+      // or the OS sound would mask the custom one).
+      if ('Notification' in window) {
+        const show = () => new Notification(latestNotification.title, {
+          body  : latestNotification.message,
+          icon  : '/favicon.ico',
+          badge : '/favicon.ico',
+          tag   : latestNotification.id,
+          silent: true,
+        });
+
         if (Notification.permission === 'granted') {
-          new Notification(latestNotification.title, {
-            body: latestNotification.message,
-            icon: '/favicon.ico',
-            badge: '/favicon.ico',
-            tag: latestNotification.id // Prevent duplicate system notifications
-          });
+          show();
         } else if (Notification.permission !== 'denied') {
-          Notification.requestPermission().then(permission => {
-            if (permission === 'granted') {
-              new Notification(latestNotification.title, {
-                body: latestNotification.message,
-                icon: '/favicon.ico',
-                badge: '/favicon.ico',
-                tag: latestNotification.id
-              });
-            }
-          });
+          Notification.requestPermission().then(p => { if (p === 'granted') show(); });
         }
       }
     }

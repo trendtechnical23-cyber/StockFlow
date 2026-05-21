@@ -280,6 +280,18 @@ class ZohoService {
                 return tokenData.access_token;
             }
             
+            // No refresh token stored → we can never auto-renew. This happens when the
+            // org was authorized without prompt=consent (Zoho then issues no refresh
+            // token). The user must reconnect once to mint a persistent refresh token.
+            if (!tokenData.refresh_token) {
+                // If the access token still has life, use it; otherwise force a reconnect.
+                if (tokenData.access_token && tokenData.expires_at && tokenData.expires_at > now) {
+                    console.warn('⚠️  No refresh_token stored; using still-valid access token');
+                    return tokenData.access_token;
+                }
+                throw new Error('ZOHO_REAUTH_REQUIRED: No Zoho refresh token on file. Please reconnect Zoho Books in Integrations settings (one-time).');
+            }
+
             // Refresh the token — use per-org credentials if available
             console.log('🔄 Refreshing access token for organization:', organizationId);
 
@@ -287,7 +299,7 @@ class ZohoService {
             const refreshClientId = orgConfig?.clientId || this.clientId;
             const refreshClientSecret = orgConfig?.clientSecret || this.clientSecret;
             const refreshAccountsUrl = orgConfig ? this._accountsUrlForRegion(orgConfig.region) : this.accountsUrl;
-            
+
             try {
                 const response = await axios.post(`${refreshAccountsUrl}/oauth/v2/token`, null, {
                     params: {
@@ -302,19 +314,20 @@ class ZohoService {
                 });
 
                 if (response.data.access_token) {
-                    const updatedTokens = {
-                        ...tokenData,
-                        access_token: response.data.access_token,
-                        expires_in: response.data.expires_in,
-                        expires_at: now + (response.data.expires_in * 1000),
-                        updatedAt: new Date()
-                    };
+                    const newExpiresAt = now + (response.data.expires_in * 1000);
                     const db = admin.firestore();
+                    // Only update the fields that change — never overwrite refresh_token
+                    // (Zoho does not return it on refresh) or other stored metadata.
                     await db.collection('organizations')
                         .doc(organizationId)
                         .collection('integrations')
                         .doc('zoho')
-                        .update(updatedTokens);
+                        .update({
+                            access_token: response.data.access_token,
+                            expires_in: response.data.expires_in,
+                            expires_at: newExpiresAt,
+                            updatedAt: new Date()
+                        });
                     console.log('✅ Access token refreshed and stored for organization:', organizationId);
                     return response.data.access_token;
                 }
@@ -324,16 +337,16 @@ class ZohoService {
                 throw new Error(zohoError);
 
             } catch (refreshError) {
-                // Refresh failed — if we still have a stored access_token use it as a fallback.
-                // This handles cases where ZOHO_CLIENT_ID/SECRET are not configured on the
-                // backend yet, or Zoho returns an unexpected response, while the stored token
-                // is still valid (Zoho tokens live for 1 hour; we try to refresh at 5 min to
-                // expiry, so we often have headroom).
-                if (tokenData.access_token) {
-                    console.warn(`⚠️  Token refresh failed (${refreshError.message}), falling back to stored access token`);
+                const zohoErr = refreshError.response?.data?.error || refreshError.message;
+                // If the stored access token is still valid, fall back to it (transient
+                // refresh hiccup, e.g. Zoho rate limit). Only do this when not expired.
+                if (tokenData.access_token && tokenData.expires_at && tokenData.expires_at > now) {
+                    console.warn(`⚠️  Token refresh failed (${zohoErr}); stored token still valid — using it`);
                     return tokenData.access_token;
                 }
-                throw refreshError;
+                // Refresh failed AND token is expired → surface a clear, actionable error.
+                console.error(`❌ Zoho token refresh failed and access token expired: ${zohoErr}`);
+                throw new Error('ZOHO_REAUTH_REQUIRED: Could not refresh Zoho access token. Please reconnect Zoho Books in Integrations settings.');
             }
         } catch (error) {
             console.error('❌ Failed to get access token for organization:', organizationId, error.message);
@@ -423,8 +436,14 @@ class ZohoService {
      */
     async getItemsPage(organizationId, page = 1, perPage = 200) {
         try {
-            const accessToken = await this.getAccessTokenForOrg(organizationId);
-            
+            // Resolve BOTH the (refreshed) access token and the per-org Zoho org id.
+            // Previously this used this.organizationId (the env var), which is wrong
+            // in multi-tenant mode and caused "Failed to fetch items" errors.
+            const [accessToken, zohoOrgId] = await Promise.all([
+                this.getAccessTokenForOrg(organizationId),
+                this.getZohoOrgIdForOrg(organizationId)
+            ]);
+
             const config = {
                 method: 'GET',
                 url: `${this.booksApiUrl}/items`,
@@ -433,7 +452,7 @@ class ZohoService {
                     'Content-Type': 'application/json'
                 },
                 params: {
-                    organization_id: this.organizationId,
+                    organization_id: zohoOrgId,
                     page: page,
                     per_page: perPage
                 }
@@ -625,9 +644,9 @@ class ZohoService {
                 return tokenData.zoho_organization_id;
             }
 
-            // Fetch from Zoho Books API
+            // Fetch from Zoho Books API — use a guaranteed-valid (refreshed) token
             console.log('🔍 Fetching Zoho organization ID from /organizations API...');
-            const accessToken = tokenData.access_token;
+            const accessToken = await this.getAccessTokenForOrg(organizationId);
             const response = await axios.get(`${this.booksApiUrl}/organizations`, {
                 headers: { 'Authorization': `Zoho-oauthtoken ${accessToken}` }
             });

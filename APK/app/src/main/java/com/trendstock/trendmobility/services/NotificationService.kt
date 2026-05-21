@@ -1,6 +1,5 @@
 package com.trendstock.trendmobility.services
 
-import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
 import android.os.Build
@@ -9,104 +8,124 @@ import androidx.core.app.NotificationManagerCompat
 import com.trendstock.trendmobility.R
 import java.util.concurrent.atomic.AtomicInteger
 
+/**
+ * NotificationService — local (non-FCM) push notifications.
+ *
+ * Uses the channels declared by StockFlowMessagingService so that sound
+ * settings are consistent across FCM and local notifications.
+ */
 class NotificationService private constructor(private val context: Context) {
-    
-    companion object {
-        private const val CHANNEL_ID = "TrendMobility_Notifications"
-        private const val CHANNEL_NAME = "Stock Alerts"
-        private const val CHANNEL_DESCRIPTION = "Stock level and system notifications"
 
+    companion object {
         /**
-         * Each notification gets a unique ID so Android shows them as separate
-         * cards in the notification shade (cascading), rather than replacing the
-         * previous one.  We start above 1000 to avoid clashing with any legacy
-         * static IDs that may still exist elsewhere.
+         * Each notification gets a unique ID so Android stacks them in the
+         * shade rather than replacing the previous one.
+         * Start above 2000 to avoid collisions with FCM notification IDs.
          */
-        private val notificationCounter = AtomicInteger(1100)
-        
+        private val notificationCounter = AtomicInteger(2100)
+
         @Volatile
         private var INSTANCE: NotificationService? = null
-        
-        fun getInstance(context: Context): NotificationService {
-            return INSTANCE ?: synchronized(this) {
+
+        fun getInstance(context: Context): NotificationService =
+            INSTANCE ?: synchronized(this) {
                 INSTANCE ?: NotificationService(context.applicationContext).also { INSTANCE = it }
             }
-        }
     }
-    
+
     init {
-        createNotificationChannel()
+        // Channels are created by StockFlowMessagingService.createNotificationChannels().
+        // We call ensureChannels() here as a safety net in case this service is
+        // used before the FCM service has ever started (e.g. first launch).
+        ensureChannels()
     }
-    
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val importance = NotificationManager.IMPORTANCE_DEFAULT
-            val channel = NotificationChannel(CHANNEL_ID, CHANNEL_NAME, importance).apply {
-                description = CHANNEL_DESCRIPTION
-            }
-            
-            val notificationManager: NotificationManager =
-                context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            notificationManager.createNotificationChannel(channel)
-        }
+
+    /**
+     * Create channels if they don't exist yet.
+     * Delegates to the single shared definition in StockFlowMessagingService
+     * so channel/sound config lives in exactly one place.
+     */
+    private fun ensureChannels() {
+        StockFlowMessagingService.createNotificationChannels(context)
     }
-    
+
+    // ── Public API ────────────────────────────────────────────────────────────
+
     fun showStockAlert(itemName: String, alertType: String, quantity: Int) {
-        val title = when (alertType) {
-            "LOW_STOCK" -> "⚠️ Low Stock Alert"
-            "OUT_OF_STOCK" -> "❌ Out of Stock"
-            "RESTOCK" -> "✅ Restocked"
-            else -> "📊 Stock Update"
+        val (title, message, channelId) = when (alertType) {
+            "LOW_STOCK"    -> Triple(
+                "Low Stock Alert",
+                "$itemName is running low — $quantity units remaining.",
+                StockFlowMessagingService.CHANNEL_LOW_STOCK
+            )
+            "OUT_OF_STOCK" -> Triple(
+                "Out of Stock",
+                "$itemName is out of stock. Restock needed immediately.",
+                StockFlowMessagingService.CHANNEL_LOW_STOCK
+            )
+            "RESTOCK"      -> Triple(
+                "Stock Replenished",
+                "$itemName has been restocked — $quantity units now available.",
+                StockFlowMessagingService.CHANNEL_STOCK_IN_OUT
+            )
+            else           -> Triple(
+                "Inventory Update",
+                "$itemName: $quantity units.",
+                StockFlowMessagingService.CHANNEL_GENERAL
+            )
         }
-        
-        val message = when (alertType) {
-            "LOW_STOCK" -> "$itemName is running low ($quantity remaining)"
-            "OUT_OF_STOCK" -> "$itemName is out of stock"
-            "RESTOCK" -> "$itemName has been restocked ($quantity units)"
-            else -> "$itemName: $quantity units"
-        }
-        
-        showNotification(title, message)
+        showNotification(title, message, channelId)
     }
-    
+
     fun showSystemNotification(title: String, message: String) {
-        showNotification("🔔 $title", message)
+        showNotification(title, message, StockFlowMessagingService.CHANNEL_GENERAL)
     }
-    
-    fun showStockTakeNotification(sessionId: String, userEmail: String) {
+
+    fun showStockTakeNotification(sessionId: String, userName: String) {
         showNotification(
-            "📋 Stock Take Started",
-            "Stock take session initiated by $userEmail"
+            title     = "Stock Take Started",
+            message   = "$userName started a new stock take session.",
+            channelId = StockFlowMessagingService.CHANNEL_STOCK_TAKE
         )
     }
-    
-    /**
-     * Post a notification with a unique auto-incremented ID so that multiple
-     * notifications stack in the shade sorted by most-recent (Android shows them
-     * newest-first by default within the same app).
-     */
-    private fun showNotification(title: String, message: String) {
+
+    fun showApprovalNotification(title: String, message: String) {
+        showNotification(title, message, StockFlowMessagingService.CHANNEL_APPROVAL)
+    }
+
+    // ── Internal ──────────────────────────────────────────────────────────────
+
+    private fun showNotification(title: String, message: String, channelId: String) {
         try {
             val notificationId = notificationCounter.getAndIncrement()
-            val builder = NotificationCompat.Builder(context, CHANNEL_ID)
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
+            // Small icon must be a transparent white silhouette; logo is the large icon.
+            val largeIcon = try {
+                android.graphics.BitmapFactory.decodeResource(context.resources, R.drawable.stockflowlogo)
+            } catch (e: Exception) { null }
+
+            val builder = NotificationCompat.Builder(context, channelId)
+                .setSmallIcon(R.drawable.ic_notification)
+                .also { if (largeIcon != null) it.setLargeIcon(largeIcon) }
                 .setContentTitle(title)
                 .setContentText(message)
                 .setStyle(NotificationCompat.BigTextStyle().bigText(message))
-                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                .setPriority(
+                    if (channelId == StockFlowMessagingService.CHANNEL_LOW_STOCK ||
+                        channelId == StockFlowMessagingService.CHANNEL_STOCK_TAKE ||
+                        channelId == StockFlowMessagingService.CHANNEL_APPROVAL)
+                        NotificationCompat.PRIORITY_HIGH
+                    else
+                        NotificationCompat.PRIORITY_DEFAULT
+                )
                 .setAutoCancel(true)
-                // Sort key ensures newest notifications appear first in the shade
                 .setSortKey(System.currentTimeMillis().toString())
-            
-            with(NotificationManagerCompat.from(context)) {
-                notify(notificationId, builder.build())
-            }
-        } catch (e: SecurityException) {
-            // Notification permission not granted — handled gracefully
+
+            NotificationManagerCompat.from(context).notify(notificationId, builder.build())
+        } catch (_: SecurityException) {
+            // Notification permission not granted — fail silently
         }
     }
-    
-    fun areNotificationsEnabled(): Boolean {
-        return NotificationManagerCompat.from(context).areNotificationsEnabled()
-    }
+
+    fun areNotificationsEnabled(): Boolean =
+        NotificationManagerCompat.from(context).areNotificationsEnabled()
 }

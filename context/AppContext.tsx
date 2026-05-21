@@ -75,11 +75,15 @@ const appReducer = (state: AppState, action: Action): AppState => {
                 const root = document.documentElement;
                 root.classList.remove('light', 'dark');
                 root.classList.add(action.payload.theme);
-                
+
                 // Update body background for better theme switching
-                document.body.className = action.payload.theme === 'dark' 
-                    ? 'bg-gray-900 text-gray-100' 
+                document.body.className = action.payload.theme === 'dark'
+                    ? 'bg-gray-900 text-gray-100'
                     : 'bg-gray-100 text-gray-900';
+
+                // Persist to a dedicated key that clearLocalData() never wipes,
+                // so the choice survives org switches and tab reopens.
+                try { localStorage.setItem('stockflow_theme', action.payload.theme); } catch (_) {}
             }
             
             try {
@@ -328,7 +332,15 @@ export const AppProvider: React.FC<{ children: ReactNode, user: User, organizati
                 target: 'mostUsed',
                 mostUsedCount: 100,
             },
-            theme: user.themePreference || 'dark',
+            // Theme resolution order: dedicated key (survives org-switch data clears)
+            // → user's saved profile preference → light (the app default).
+            theme: ((): 'light' | 'dark' => {
+                try {
+                    const saved = localStorage.getItem('stockflow_theme');
+                    if (saved === 'light' || saved === 'dark') return saved;
+                } catch (_) {}
+                return user.themePreference || 'light';
+            })(),
             zohoSync: {
                 frequency: 'daily',
                 defaultCategory: '',
@@ -574,21 +586,26 @@ export const AppProvider: React.FC<{ children: ReactNode, user: User, organizati
                 newActiveSessions.forEach(async (session) => {
                     try {
                         const notifService = (await import('../services/notificationService')).default;
+                        // Only ever show the human-readable device model name.
+                        // Never the raw hex device ID, and never repeat the username here.
+                        const deviceLabel = session.deviceName || 'a mobile device';
                         await notifService.createNotification(orgId, {
-                            type: 'stock',
-                            title: '📦 Stock Take Session Started',
-                            message: `${session.userName || 'A mobile user'} launched a stock take on ${session.deviceId || 'a mobile device'}. Review in Stock Take Monitor.`,
+                            type: 'stock_take_session' as any,
+                            title: 'Stock Take Started',
+                            message: `${session.userName || 'A mobile user'} started a stock take on ${deviceLabel}. Review in Stock Take Monitor.`,
                             targetUserId: 'ALL',
                             priority: 'high',
                             link: '/stock-take-monitor',
                             metadata: {
                                 sessionId: session.id,
                                 deviceId: session.deviceId,
+                                deviceName: session.deviceName,
                                 userName: session.userName,
                                 startTime: session.startTime,
-                                source: 'apk'
+                                source: 'apk',
+                                eventType: 'STARTED'
                             }
-                        });
+                        } as any);
                         console.log('🔔 Notification created for new stock take session:', session.id);
                     } catch (e) {
                         console.warn('⚠️ Failed to create stock take notification:', e);

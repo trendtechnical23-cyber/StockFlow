@@ -56,7 +56,8 @@ data class OfflineStockTakeItem(
     val scannedQuantity: Int,
     val expectedQuantity: Int = 0,
     val scannedAt: Long = System.currentTimeMillis(),
-    val deviceId: String
+    val deviceId: String,
+    val deviceName: String = android.os.Build.MODEL
 ) {
     val variance: Int get() = scannedQuantity - expectedQuantity
 }
@@ -1285,13 +1286,14 @@ private suspend fun syncSessionToDashboard(context: Context, session: OfflineSto
     return try {
         Log.d("StockTakeScreen", "🔄 Starting sync for session: ${session.id}")
         
-        val firestore = FirebaseFirestore.getInstance()
-        val deviceId = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
+        val firestore  = FirebaseFirestore.getInstance()
+        val deviceId   = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
+        val deviceName = Build.MODEL
         val currentUser = FirebaseAuth.getInstance().currentUser
         val userName = currentUser?.email?.substringBefore("@") ?: currentUser?.displayName ?: "Unknown User"
-        
+
         Log.d("StockTakeScreen", "👤 Current user: ${currentUser?.email}")
-        Log.d("StockTakeScreen", "📱 Device ID: $deviceId")
+        Log.d("StockTakeScreen", "📱 Device: $deviceName ($deviceId)")
         
         // Use OrganizationManager for consistency
         val orgId = com.trendstock.trendmobility.utils.OrganizationManager.getCurrentOrganizationId()
@@ -1322,31 +1324,33 @@ private suspend fun syncSessionToDashboard(context: Context, session: OfflineSto
         // Create Firestore session document (matches dashboard structure)
         val sessionData = hashMapOf(
             "organizationId" to finalOrgId,
-            "userId" to currentUser.uid,
-            "userName" to userName,
-            "deviceId" to deviceId,
-            "status" to "COMPLETED", // Mark as completed since APK sessions are finished
-            "startTime" to session.startedAt,
-            "endTime" to (session.endedAt ?: System.currentTimeMillis()),
-            "itemsScanned" to session.items.size,
-            "scannedItems" to session.items.map { item ->
+            "userId"         to currentUser.uid,
+            "userName"       to userName,
+            "deviceId"       to deviceId,
+            "deviceName"     to deviceName,
+            "status"         to "COMPLETED",
+            "startTime"      to session.startedAt,
+            "endTime"        to (session.endedAt ?: System.currentTimeMillis()),
+            "itemsScanned"   to session.items.size,
+            "scannedItems"   to session.items.map { item ->
                 hashMapOf(
-                    "itemId" to item.itemId,
-                    "itemName" to item.itemName,
-                    "sku" to item.sku,
-                    "scannedQuantity" to item.scannedQuantity,
+                    "itemId"           to item.itemId,
+                    "itemName"         to item.itemName,
+                    "sku"              to item.sku,
+                    "scannedQuantity"  to item.scannedQuantity,
                     "expectedQuantity" to item.expectedQuantity,
-                    "variance" to item.variance,
-                    "scannedAt" to com.google.firebase.Timestamp(java.util.Date(item.scannedAt)),
-                    "scannedBy" to currentUser.email,
-                    "scannedByName" to userName,
-                    "deviceId" to deviceId,
-                    "source" to "mobile_app"
+                    "variance"         to item.variance,
+                    "scannedAt"        to com.google.firebase.Timestamp(java.util.Date(item.scannedAt)),
+                    "scannedBy"        to currentUser.email,
+                    "scannedByName"    to userName,
+                    "deviceId"         to deviceId,
+                    "deviceName"       to deviceName,
+                    "source"           to "mobile_app"
                 )
             },
             "createdAt" to com.google.firebase.firestore.FieldValue.serverTimestamp(),
             "updatedAt" to com.google.firebase.firestore.FieldValue.serverTimestamp(),
-            "source" to "mobile_app_sync"
+            "source"    to "mobile_app_sync"
         )
         
         Log.d("StockTakeScreen", "📄 Session data prepared with ${session.items.size} items")

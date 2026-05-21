@@ -34,6 +34,8 @@ interface ScannedItem {
 interface StockTakeSession {
   id: string;
   deviceId: string;
+  /** Human-readable device model name (e.g. "TC15"). Prefer over deviceId for display. */
+  deviceName?: string;
   userName: string;
   userEmail: string;
   startTime: number;
@@ -102,9 +104,10 @@ const StockTakeMonitorView: React.FC = () => {
         s.status === 'COMPLETED' || s.status === 'ACTIVE' || s.status === 'PENDING_APPROVAL'
       );
       
-      const processedSessions = pendingSessions.map(session => ({
+      const processedSessions = pendingSessions.map((session: any) => ({
         id: session.id,
         deviceId: session.deviceId || 'unknown',
+        deviceName: session.deviceName || undefined,
         userName: session.userName || 'Mobile User',
         userEmail: session.userEmail || 'mobile@stockflow.com',
         startTime: session.startTime || Date.now(),
@@ -140,9 +143,10 @@ const StockTakeMonitorView: React.FC = () => {
         console.log('🔍 Filtered to pending sessions:', pendingSessions.length, '(excluded APPROVED/REJECTED)');
         
         // Convert APK sessions to pending approvals format with professional naming
-        const apkPendingApprovals = pendingSessions.map(session => ({
+        const apkPendingApprovals = pendingSessions.map((session: any) => ({
           id: session.id,
           deviceId: session.deviceId,
+          deviceName: session.deviceName || undefined,
           userName: session.userName,
           userEmail: session.userName + '@domain.com', // Placeholder
           startTime: session.startTime,
@@ -169,7 +173,7 @@ const StockTakeMonitorView: React.FC = () => {
                 action: 'Stock Take Session Synced',
                 actionBy: session.userName || 'Mobile User',
                 actionByEmail: session.userEmail || 'mobile@stockflow.com',
-                description: `Mobile stock take session completed with ${session.itemsScanned} items scanned. Device: ${session.deviceId}. Status: Awaiting admin approval for inventory updates.`,
+                description: `Mobile stock take session completed with ${session.itemsScanned} items scanned. Device: ${session.deviceName || session.userName || 'Mobile device'}. Status: Awaiting admin approval for inventory updates.`,
                 itemName: `Stock Take Session: ${session.displayName}`,
                 details: {
                   sessionId: session.id,
@@ -349,8 +353,9 @@ const StockTakeMonitorView: React.FC = () => {
 
                 pendingSessions.push({
                   id: sessionData.sessionId || firebaseKey,
-                  deviceId: sessionData.deviceId || sessionData.deviceName || 'Unknown Device',
-                  userName: sessionData.deviceName || sessionData.userEmail || 'Unknown User',
+                  deviceId: sessionData.deviceId || 'unknown',
+                  deviceName: sessionData.deviceName || undefined,
+                  userName: sessionData.userName || sessionData.userEmail?.split('@')[0] || 'Mobile User',
                   userEmail: sessionData.userEmail || '',
                   startTime: sessionData.startedAt || sessionData.timestamp || Date.now(),
                   endTime: sessionData.endedAt,
@@ -636,7 +641,7 @@ const StockTakeMonitorView: React.FC = () => {
             `"${scannedTime}"`,
             `"${item.scannedByName || item.scannedBy || 'Unknown'}"`,
             `"${session.userName}"`,
-            `"${session.deviceId}"`
+            `"${session.deviceName || session.userName || session.deviceId}"`
           ].join(','));
         });
       }
@@ -1069,9 +1074,9 @@ const StockTakeMonitorView: React.FC = () => {
               </div>
 
               <div>
-                <p className="text-sm text-gray-500 dark:text-gray-400">Device ID</p>
+                <p className="text-sm text-gray-500 dark:text-gray-400">Device</p>
                 <p className="text-lg font-medium text-gray-900 dark:text-white">
-                  {selectedSession.deviceId}
+                  {selectedSession.deviceName || selectedSession.userName || selectedSession.deviceId}
                 </p>
               </div>
 

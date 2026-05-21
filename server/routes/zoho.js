@@ -143,13 +143,19 @@ router.get('/auth/url', verifyFirebaseToken, async (req, res) => {
             timestamp: Date.now()
         })).toString('base64');
         
+        // access_type=offline + prompt=consent is REQUIRED for Zoho to return a
+        // refresh_token. Without prompt=consent, a re-authorization (any auth after
+        // the first) returns ONLY a 1-hour access token and no refresh token — so
+        // the integration silently dies ~1 hour later and the user must reconfigure.
+        // Forcing the consent screen guarantees a fresh refresh_token every time.
         const authUrl = `https://${accountsDomain}/oauth/v2/auth?` +
             `response_type=code&` +
             `client_id=${clientId}&` +
             `scope=ZohoBooks.fullaccess.all&` +
             `redirect_uri=${encodeURIComponent(redirectUri)}&` +
             `state=${encodeURIComponent(state)}&` +
-            `access_type=offline`;
+            `access_type=offline&` +
+            `prompt=consent`;
         
         console.log('🔗 Generated Zoho auth URL for org:', organizationId);
         

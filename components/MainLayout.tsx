@@ -12,9 +12,10 @@ import ActivityView from '../pages/ActivityView';
 import SettingsView from '../pages/SettingsView';
 import StockTakeMonitorView from '../pages/StockTakeMonitorView';
 import IntegrationsView from '../pages/IntegrationsView';
-import BillingView from '../pages/BillingView';
-import BillingSuccess from '../pages/BillingSuccess';
-import BillingCancel from '../pages/BillingCancel';
+// Billing temporarily disabled — re-enable later
+// import BillingView from '../pages/BillingView';
+// import BillingSuccess from '../pages/BillingSuccess';
+// import BillingCancel from '../pages/BillingCancel';
 import ItemDetailView from '../pages/ItemDetailView';
 import LowStockView from '../pages/LowStockView';
 import PriorityItemsView from '../pages/PriorityItemsView';
@@ -52,9 +53,10 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout, isUserActive = true }
     const params = new URLSearchParams(window.location.search);
     const viewParam = params.get('view');
     if (viewParam) {
-      if (viewParam === 'billing-success') setView(View.BillingSuccess);
-      if (viewParam === 'billing-cancel') setView(View.BillingCancel);
-      
+      // Billing temporarily disabled — re-enable later
+      // if (viewParam === 'billing-success') setView(View.BillingSuccess);
+      // if (viewParam === 'billing-cancel') setView(View.BillingCancel);
+
       // Clean up URL without reloading
       const newUrl = window.location.pathname;
       window.history.replaceState({}, '', newUrl);
@@ -84,12 +86,13 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onLogout, isUserActive = true }
         return <SettingsView />;
       case View.Integrations:
         return <IntegrationsView />;
-      case View.Billing:
-        return <BillingView />;
-      case View.BillingSuccess:
-        return <BillingSuccess />;
-      case View.BillingCancel:
-        return <BillingCancel />;
+      // Billing temporarily disabled — re-enable later
+      // case View.Billing:
+      //   return <BillingView />;
+      // case View.BillingSuccess:
+      //   return <BillingSuccess />;
+      // case View.BillingCancel:
+      //   return <BillingCancel />;
       case View.ZohoApprovals:
         return <ZohoApprovalsView />;
       case View.Categories:

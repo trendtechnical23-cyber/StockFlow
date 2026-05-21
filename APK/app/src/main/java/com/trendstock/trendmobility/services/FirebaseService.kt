@@ -82,9 +82,10 @@ class FirebaseService(private val context: Context) {
     
     // Submit pending change for admin approval - NO immediate stock update
     fun submitPendingChange(stockId: String, changeType: String, quantity: Int, reason: String) {
-        val userId = auth.currentUser?.uid ?: return
-        val userEmail = auth.currentUser?.email ?: ""
+        val userId          = auth.currentUser?.uid ?: return
+        val userEmail       = auth.currentUser?.email ?: ""
         val userDisplayName = auth.currentUser?.displayName ?: userEmail.split("@").firstOrNull() ?: "Mobile User"
+        val deviceName      = android.os.Build.MODEL
         
         Log.d(TAG, "🚀 STARTING STOCK UPDATE: $stockId ($changeType: $quantity)")
         
@@ -164,22 +165,23 @@ class FirebaseService(private val context: Context) {
                             
                             // Create approval request
                             val approvalRequest = hashMapOf(
-                                "type" to "zoho_sync",
-                                "action" to "adjust_stock",
-                                "itemId" to stockId,
-                                "itemName" to itemName,
-                                "itemSKU" to itemSKU,
-                                "requestedBy" to userId,
+                                "type"            to "zoho_sync",
+                                "action"          to "adjust_stock",
+                                "itemId"          to stockId,
+                                "itemName"        to itemName,
+                                "itemSKU"         to itemSKU,
+                                "requestedBy"     to userId,
                                 "requestedByName" to userDisplayName,
+                                "deviceName"      to deviceName,
                                 "requestedChange" to hashMapOf(
                                     "quantityDelta" to quantityDelta,
-                                    "newQuantity" to newQuantity,
-                                    "reason" to reason
+                                    "newQuantity"   to newQuantity,
+                                    "reason"        to reason
                                 ),
-                                "status" to "pending",
+                                "status"      to "pending",
                                 "requestedAt" to com.google.firebase.Timestamp.now(),
-                                "processed" to false,
-                                "source" to "apk"
+                                "processed"   to false,
+                                "source"      to "apk"
                             )
                             
                             firestore.collection("organizations")
@@ -255,27 +257,29 @@ class FirebaseService(private val context: Context) {
         userName: String,
         approvalId: String
     ) {
+        val device     = android.os.Build.MODEL
         val actionText = when (changeType) {
-            "stock_in" -> "📲 Mobile: Stock In Request (+$quantity)"
-            "stock_out" -> "📲 Mobile: Stock Out Request (-$quantity)"
-            else -> "📲 Mobile: Stock Change Request"
+            "stock_in"  -> "Stock In +$quantity units"
+            "stock_out" -> "Stock Out -$quantity units"
+            else        -> "Stock Change"
         }
-        
+
         val notificationData = hashMapOf(
-            "type" to "approval_pending",
-            "title" to "📱 Mobile Stock Change Request",
-            "message" to "$userName requested $actionText for $itemName",
+            "type"         to "approval_pending",
+            "title"        to "Approval Required",
+            "message"      to "$userName ($device) requested $actionText for $itemName.",
             "targetUserId" to "ALL",
-            "priority" to "high",
-            "createdAt" to com.google.firebase.Timestamp.now(),
-            "readBy" to listOf<String>(),
-            "metadata" to hashMapOf(
-                "approvalId" to approvalId,
-                "itemName" to itemName,
-                "changeType" to changeType,
-                "quantity" to quantity,
-                "source" to "mobile_app",
-                "userName" to userName
+            "priority"     to "high",
+            "createdAt"    to com.google.firebase.Timestamp.now(),
+            "readBy"       to listOf<String>(),
+            "metadata"     to hashMapOf(
+                "approvalId"  to approvalId,
+                "itemName"    to itemName,
+                "changeType"  to changeType,
+                "quantity"    to quantity,
+                "source"      to "mobile_app",
+                "userName"    to userName,
+                "deviceName"  to device
             )
         )
         
@@ -399,10 +403,11 @@ class FirebaseService(private val context: Context) {
 
     // Record stock take scan in active session
     private fun recordStockTakeScan(orgId: String, sessionId: String, stockId: String, scannedQuantity: Int, reason: String) {
-        val userEmail = auth.currentUser?.email ?: "unknown@example.com"
-        val userName = auth.currentUser?.displayName ?: userEmail.substringBefore("@")
-        val deviceId = "apk_${android.provider.Settings.Secure.getString(
-            context.contentResolver, 
+        val userEmail  = auth.currentUser?.email ?: "unknown@example.com"
+        val userName   = auth.currentUser?.displayName ?: userEmail.substringBefore("@")
+        val deviceName = android.os.Build.MODEL
+        val deviceId   = "apk_${android.provider.Settings.Secure.getString(
+            context.contentResolver,
             android.provider.Settings.Secure.ANDROID_ID
         )}"
         
@@ -433,17 +438,18 @@ class FirebaseService(private val context: Context) {
                     // ⚠️ APK ONLY writes to RTDB session (NOT directly to Firestore inventory/stockTakeEntries) 
                     // Dashboard admin approval workflow will handle Firestore writes
                     val scannedItem = mapOf(
-                        "stockId" to stockId,
-                        "itemName" to itemName,
-                        "sku" to sku,
-                        "scannedQuantity" to scannedQuantity,
+                        "stockId"          to stockId,
+                        "itemName"         to itemName,
+                        "sku"              to sku,
+                        "scannedQuantity"  to scannedQuantity,
                         "expectedQuantity" to expectedQuantity,
-                        "scannedBy" to userEmail,
-                        "scannedByName" to userName,
-                        "scannedAt" to System.currentTimeMillis(),
-                        "deviceId" to deviceId,
-                        "variance" to (scannedQuantity - expectedQuantity),
-                        "reason" to reason
+                        "scannedBy"        to userEmail,
+                        "scannedByName"    to userName,
+                        "scannedAt"        to System.currentTimeMillis(),
+                        "deviceId"         to deviceId,
+                        "deviceName"       to deviceName,
+                        "variance"         to (scannedQuantity - expectedQuantity),
+                        "reason"           to reason
                     )
                     
                     // Add to session's scannedItems (use sanitized SKU as key for duplicate detection)

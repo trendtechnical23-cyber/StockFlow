@@ -65,7 +65,8 @@ const Sidebar: React.FC = () => {
     { view: View.Activity, label: 'Activity Log', icon: <ActivityIcon /> },
     { view: View.ZohoApprovals, label: 'Approvals', icon: <ApprovalIcon />, roles: [UserRole.Admin], badge: pendingApprovalsCount },
     { view: View.Integrations, label: 'Integrations', icon: <IntegrationsIcon />, roles: [UserRole.Admin] },
-    { view: View.Billing, label: 'Billing', icon: <BillingIcon />, roles: [UserRole.Admin] },
+    // Billing temporarily hidden — re-enable later
+    // { view: View.Billing, label: 'Billing', icon: <BillingIcon />, roles: [UserRole.Admin] },
     { view: View.Settings, label: 'Settings', icon: <SettingsIcon /> },
   ];
   
