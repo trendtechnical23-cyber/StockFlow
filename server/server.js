@@ -13,11 +13,29 @@ const app = express();
 app.use(helmet());
 
 const getAllowedOrigins = () => {
-  const origins = ['http://localhost:3000', 'http://localhost:3001', 'http://localhost:5173'];
-  if (process.env.CLIENT_URL) origins.push(process.env.CLIENT_URL);
+  const origins = [
+    'http://localhost:3000',
+    'http://localhost:3001',
+    'http://localhost:5173',
+    // Production Firebase Hosting domains — always allowed
+    'https://stockflow-dashboard-a1aa6.web.app',
+    'https://stockflow-dashboard-a1aa6.firebaseapp.com',
+  ];
+  // Additional origins from env (comma-separated)
+  if (process.env.CLIENT_URL) {
+    process.env.CLIENT_URL.split(',').map(u => u.trim()).filter(Boolean).forEach(u => origins.push(u));
+  }
   return origins;
 };
-app.use(cors({ origin: getAllowedOrigins(), credentials: true }));
+app.use(cors({
+  origin: (origin, callback) => {
+    // Allow requests with no origin (mobile apps, curl, Postman)
+    if (!origin) return callback(null, true);
+    if (getAllowedOrigins().includes(origin)) return callback(null, true);
+    callback(new Error(`CORS: origin ${origin} not allowed`));
+  },
+  credentials: true,
+}));
 app.use(morgan('combined'));
 app.use(bodyParser.json({ limit: '10mb' }));
 app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }));
