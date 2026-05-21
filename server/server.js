@@ -21,10 +21,10 @@ const getAllowedOrigins = () => {
     'https://stockflow-dashboard-a1aa6.web.app',
     'https://stockflow-dashboard-a1aa6.firebaseapp.com',
   ];
-  // Additional origins from env (comma-separated)
-  if (process.env.CLIENT_URL) {
-    process.env.CLIENT_URL.split(',').map(u => u.trim()).filter(Boolean).forEach(u => origins.push(u));
-  }
+  // Additional origins from env vars (both supported, comma-separated)
+  [process.env.CLIENT_URL, process.env.CORS_ORIGINS].forEach(envVal => {
+    if (envVal) envVal.split(',').map(u => u.trim()).filter(Boolean).forEach(u => origins.push(u));
+  });
   return origins;
 };
 app.use(cors({
