@@ -1,11 +1,23 @@
+// ── STEP 0: Global crash guards — MUST be the very first lines ───────────────
+// Registered synchronously before any other code runs so they catch everything.
+process.on('uncaughtException', (err) => {
+  console.error('[CRASH] uncaughtException — server kept alive:', err.message);
+  console.error(err.stack);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[CRASH] unhandledRejection — server kept alive:', reason);
+});
+
+console.log('[1] Loading dependencies...');
 const express = require('express');
-const helmet = require('helmet');
-const cors = require('cors');
-const morgan = require('morgan');
+const helmet  = require('helmet');
+const cors    = require('cors');
+const morgan  = require('morgan');
 const bodyParser = require('body-parser');
-const admin = require('firebase-admin');
+const admin   = require('firebase-admin');
 const rateLimit = require('express-rate-limit');
 require('dotenv').config();
+console.log('[2] Dependencies loaded');
 
 const app = express();
 
@@ -27,12 +39,9 @@ const buildAllowedOrigins = () => {
 };
 
 const allowedOrigins = buildAllowedOrigins();
-console.log('🌐 CORS allowed origins:', allowedOrigins);
+console.log('[3] CORS allowed origins:', allowedOrigins.join(', '));
 
-app.use(cors({
-  origin: allowedOrigins,
-  credentials: true,
-}));
+app.use(cors({ origin: allowedOrigins, credentials: true }));
 app.use(morgan('combined'));
 app.use(bodyParser.json({ limit: '10mb' }));
 app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }));
@@ -40,15 +49,12 @@ app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }));
 const generalLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 200, standardHeaders: true, legacyHeaders: false });
 const strictLimiter  = rateLimit({ windowMs: 15 * 60 * 1000, max: 20,  standardHeaders: true, legacyHeaders: false });
 app.use('/api/', generalLimiter);
+console.log('[4] Middleware registered');
 
-// ── Health check — always responds, explicit CORS so it works before any auth ──
+// ── Health check — always responds, always has CORS header ───────────────────
 app.get('/health', (req, res) => {
   const origin = req.headers.origin;
-  if (origin && allowedOrigins.includes(origin)) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-  } else {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-  }
+  res.setHeader('Access-Control-Allow-Origin', (origin && allowedOrigins.includes(origin)) ? origin : '*');
   res.setHeader('Vary', 'Origin');
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
@@ -62,77 +68,77 @@ app.get(['/callback/zoho', '/zoho/callback'], (req, res) => {
       ? value.forEach(v => target.searchParams.append(key, String(v)))
       : target.searchParams.set(key, String(value));
   });
-  console.log('🔀 Zoho OAuth redirect →', target.toString());
+  console.log('Zoho OAuth redirect to:', target.toString());
   res.redirect(302, target.toString());
 });
 
-// ── Bind port immediately — Railway healthcheck requires this ─────────────────
+// ── Bind port — Railway healthcheck requires this before any other work ───────
 const PORT = process.env.PORT || 4000;
 const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 StockFlow backend listening on 0.0.0.0:${PORT}`);
+  console.log(`[5] StockFlow backend listening on 0.0.0.0:${PORT}`);
 });
 
-// ── Firebase init — non-fatal so server keeps running on failure ──────────────
+// ── Firebase init ─────────────────────────────────────────────────────────────
 let firebaseReady = false;
 
-const initFirebase = () => {
-  try {
-    let serviceAccount;
+console.log('[6] Initialising Firebase Admin...');
+try {
+  let serviceAccount;
 
-    if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
-      serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
-      // Railway sometimes stores \n as a literal backslash-n — normalise both
-      if (serviceAccount.private_key) {
-        serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
-      }
-    } else {
-      const path = require('path');
-      const keyPath = process.env.FIREBASE_SERVICE_ACCOUNT_PATH || path.resolve('./firebase-admin-key.json');
-      serviceAccount = require(keyPath);
+  if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+    // Normalise both literal \n sequences stored by Railway and actual newlines
+    const raw = process.env.FIREBASE_SERVICE_ACCOUNT_JSON.replace(/\\n/g, '\n');
+    serviceAccount = JSON.parse(raw);
+    if (serviceAccount.private_key) {
+      serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
     }
-
-    if (!admin.apps.length) {
-      admin.initializeApp({
-        credential: admin.credential.cert(serviceAccount),
-        databaseURL: process.env.FIREBASE_DATABASE_URL,
-      });
-    }
-
-    firebaseReady = true;
-    console.log('✅ Firebase Admin initialized');
-  } catch (err) {
-    console.error('❌ Firebase init failed — API routes will return 503:', err.message);
-    // Do NOT process.exit() — keep the server alive so /health still responds
+  } else {
+    const path = require('path');
+    const keyPath = process.env.FIREBASE_SERVICE_ACCOUNT_PATH || path.resolve('./firebase-admin-key.json');
+    console.log('[6a] Loading service account from file:', keyPath);
+    serviceAccount = require(keyPath);
   }
-};
 
-initFirebase();
+  if (!admin.apps.length) {
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+      databaseURL: process.env.FIREBASE_DATABASE_URL,
+    });
+  }
+
+  firebaseReady = true;
+  console.log('[7] Firebase Admin initialised successfully');
+} catch (err) {
+  console.error('[7] Firebase init failed (server keeps running):', err.message);
+}
 
 // ── Mount API routes ──────────────────────────────────────────────────────────
-// safeMount wraps require() in a try-catch so a route file that crashes at load
-// time (e.g. because Firebase init failed) returns 503 instead of killing the
-// server process and taking /health down with it.
+console.log('[8] Mounting API routes...');
+
 const safeMount = (path, routeFile, ...middlewares) => {
   try {
     const router = require(routeFile);
     app.use(path, ...middlewares, router);
+    console.log(`[8] Mounted ${routeFile}`);
   } catch (err) {
-    console.error(`⚠️  Failed to load route ${routeFile} — mounting 503 handler:`, err.message);
+    console.error(`[8] ${routeFile} failed to load (503 handler mounted): ${err.message}`);
     app.use(path, (req, res) => res.status(503).json({ error: { message: 'Service temporarily unavailable', status: 503 } }));
   }
 };
 
-safeMount('/api/devices',   './routes/devices');
-safeMount('/api/stock',     './routes/stock');
-safeMount('/api',           './routes/read');
-safeMount('/api/admin',     './routes/admin',   strictLimiter);
-safeMount('/api/billing',   './routes/billing', strictLimiter);
-safeMount('/api/fcm',       './routes/fcm');
-safeMount('/api/notify',    './routes/notify');
-safeMount('/api/stock-take','./routes/stockTake');
-safeMount('/api/zoho',      './routes/zoho');
-safeMount('/api/pos',       './routes/pos');
-safeMount('/api/priority',  './routes/priority');
+safeMount('/api/devices',    './routes/devices');
+safeMount('/api/stock',      './routes/stock');
+safeMount('/api',            './routes/read');
+safeMount('/api/admin',      './routes/admin',   strictLimiter);
+safeMount('/api/billing',    './routes/billing', strictLimiter);
+safeMount('/api/fcm',        './routes/fcm');
+safeMount('/api/notify',     './routes/notify');
+safeMount('/api/stock-take', './routes/stockTake');
+safeMount('/api/zoho',       './routes/zoho');
+safeMount('/api/pos',        './routes/pos');
+safeMount('/api/priority',   './routes/priority');
+
+console.log('[9] All routes mounted');
 
 // ── Error handler ─────────────────────────────────────────────────────────────
 app.use((err, req, res, next) => {
@@ -147,36 +153,29 @@ app.use('*', (req, res) => {
   res.status(404).json({ error: { message: 'Route not found', status: 404 } });
 });
 
-// ── Firestore listeners — start after a short delay ───────────────────────────
+// ── Firestore listeners — delayed to avoid interfering with healthcheck ───────
 setTimeout(() => {
   if (!firebaseReady) {
-    console.warn('⚠️ Skipping Firestore listeners — Firebase not ready');
+    console.warn('[10] Skipping Firestore listeners — Firebase not ready');
     return;
   }
+  console.log('[10] Starting Firestore listeners...');
   try {
     const firestoreListenerService = require('./services/firestoreListenerService');
     firestoreListenerService.startListeners(false);
+    console.log('[10] Firestore listeners started');
   } catch (err) {
-    console.error('⚠️ Firestore listener startup failed (non-fatal):', err.message);
+    console.error('[10] Firestore listener startup failed (non-fatal):', err.message);
   }
-}, 3000);
-
-// ── Global safety net — log but don't die on unhandled async errors ───────────
-// Node.js 20 terminates on unhandled rejections by default. Any async Firestore
-// listener callback that throws without a catch becomes one of these. Logging
-// here gives us a stack trace in Railway logs while keeping the server alive.
-process.on('unhandledRejection', (reason) => {
-  console.error('⚠️ Unhandled promise rejection (server kept alive):', reason);
-});
-process.on('uncaughtException', (err) => {
-  console.error('⚠️ Uncaught exception (server kept alive):', err.message, err.stack);
-});
+}, 5000);
 
 // ── Graceful shutdown ─────────────────────────────────────────────────────────
 const gracefulShutdown = (signal) => {
-  console.log(`🛑 ${signal} — shutting down`);
-  server.close(() => { console.log('✅ Server closed'); process.exit(0); });
+  console.log(`${signal} received — shutting down`);
+  server.close(() => { console.log('Server closed'); process.exit(0); });
   setTimeout(() => process.exit(1), 10000);
 };
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
+
+console.log('[11] Server setup complete');
