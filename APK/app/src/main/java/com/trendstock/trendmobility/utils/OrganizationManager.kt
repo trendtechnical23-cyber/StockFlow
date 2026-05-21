@@ -132,6 +132,16 @@ object OrganizationManager {
         } catch (e: Exception) {
             Log.e(TAG, "❌ Failed to clear stock take sessions", e)
         }
+
+        try {
+            // Clear the legacy (pre-namespacing) shared prefs so old leaked sessions
+            // from other users are not visible after a login/org switch.
+            ctx.getSharedPreferences("StockTakeOffline", Context.MODE_PRIVATE).edit().clear().apply()
+            ctx.getSharedPreferences("SavedSessions", Context.MODE_PRIVATE).edit().clear().apply()
+            Log.d(TAG, "✅ Cleared legacy unnamespaced session prefs")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to clear legacy session prefs", e)
+        }
         
         try {
             // Clear cached inventory (FIX ISSUE #4) - Launch in coroutine

@@ -1059,6 +1059,22 @@ fun StockTakeScreenNew(
     }
 }
 
+// ── SharedPreferences namespacing ──────────────────────────────────────────
+// Keys are scoped to the current user+org so that different users on the same
+// physical device cannot see each other's stock-take sessions.
+
+private fun activeSessionPrefsName(context: Context): String {
+    val uid = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid ?: "anonymous"
+    val orgId = com.trendstock.trendmobility.utils.OrganizationManager.getCurrentOrganizationId() ?: "noorg"
+    return "StockTakeOffline_${uid}_${orgId}"
+}
+
+private fun savedSessionsPrefsName(context: Context): String {
+    val uid = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid ?: "anonymous"
+    val orgId = com.trendstock.trendmobility.utils.OrganizationManager.getCurrentOrganizationId() ?: "noorg"
+    return "SavedSessions_${uid}_${orgId}"
+}
+
 // Helper functions for offline session management
 private suspend fun startOfflineSession(context: Context): OfflineStockTakeSession {
     val deviceId = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
@@ -1154,7 +1170,7 @@ private suspend fun addItemToSession(
 
 private fun loadOfflineSession(context: Context): OfflineStockTakeSession? {
     return try {
-        val sharedPrefs = context.getSharedPreferences("StockTakeOffline", Context.MODE_PRIVATE)
+        val sharedPrefs = context.getSharedPreferences(activeSessionPrefsName(context), Context.MODE_PRIVATE)
         val sessionJson = sharedPrefs.getString("current_session", null)
         if (sessionJson != null) {
             Gson().fromJson(sessionJson, OfflineStockTakeSession::class.java)
@@ -1167,7 +1183,7 @@ private fun loadOfflineSession(context: Context): OfflineStockTakeSession? {
 
 private fun saveOfflineSession(context: Context, session: OfflineStockTakeSession) {
     try {
-        val sharedPrefs = context.getSharedPreferences("StockTakeOffline", Context.MODE_PRIVATE)
+        val sharedPrefs = context.getSharedPreferences(activeSessionPrefsName(context), Context.MODE_PRIVATE)
         val sessionJson = Gson().toJson(session)
         sharedPrefs.edit().putString("current_session", sessionJson).apply()
     } catch (e: Exception) {
@@ -1438,30 +1454,30 @@ private fun endSession(context: Context, session: OfflineStockTakeSession) {
 }
 
 private fun deleteSession(context: Context, session: OfflineStockTakeSession) {
-    val sharedPrefs = context.getSharedPreferences("StockTakeOffline", Context.MODE_PRIVATE)
+    val sharedPrefs = context.getSharedPreferences(activeSessionPrefsName(context), Context.MODE_PRIVATE)
     sharedPrefs.edit().remove("current_session").apply()
     Log.d("StockTakeScreen", "🗑️ Deleted session: ${session.id}")
 }
 
 private fun deleteActiveSession(context: Context) {
-    val sharedPrefs = context.getSharedPreferences("StockTakeOffline", Context.MODE_PRIVATE)
+    val sharedPrefs = context.getSharedPreferences(activeSessionPrefsName(context), Context.MODE_PRIVATE)
     sharedPrefs.edit().remove("current_session").apply()
     Log.d("StockTakeScreen", "🗑️ Deleted active session")
 }
 
 private fun saveSessionToList(context: Context, session: OfflineStockTakeSession) {
     try {
-        val sharedPrefs = context.getSharedPreferences("SavedSessions", Context.MODE_PRIVATE)
+        val sharedPrefs = context.getSharedPreferences(savedSessionsPrefsName(context), Context.MODE_PRIVATE)
         val existingSessions = sharedPrefs.getStringSet("session_ids", mutableSetOf())?.toMutableSet() ?: mutableSetOf()
-        
+
         // Save full session data
         val sessionJson = Gson().toJson(session)
         sharedPrefs.edit().putString("session_${session.id}", sessionJson).apply()
-        
+
         // Add to session IDs list
         existingSessions.add(session.id)
         sharedPrefs.edit().putStringSet("session_ids", existingSessions).apply()
-        
+
         Log.d("StockTakeScreen", "💾 Saved session to list: ${session.id}")
     } catch (e: Exception) {
         Log.e("StockTakeScreen", "❌ Error saving session to list: ${e.message}")
@@ -1470,7 +1486,7 @@ private fun saveSessionToList(context: Context, session: OfflineStockTakeSession
 
 private fun loadSavedSessions(context: Context): List<SavedSession> {
     try {
-        val sharedPrefs = context.getSharedPreferences("SavedSessions", Context.MODE_PRIVATE)
+        val sharedPrefs = context.getSharedPreferences(savedSessionsPrefsName(context), Context.MODE_PRIVATE)
         val sessionIds = sharedPrefs.getStringSet("session_ids", emptySet()) ?: emptySet()
         
         val sessions = mutableListOf<SavedSession>()
@@ -1505,7 +1521,7 @@ private fun loadSavedSessions(context: Context): List<SavedSession> {
 
 private fun loadSavedSessionById(context: Context, sessionId: String): OfflineStockTakeSession? {
     try {
-        val sharedPrefs = context.getSharedPreferences("SavedSessions", Context.MODE_PRIVATE)
+        val sharedPrefs = context.getSharedPreferences(savedSessionsPrefsName(context), Context.MODE_PRIVATE)
         val sessionJson = sharedPrefs.getString("session_$sessionId", null)
         return if (sessionJson != null) {
             Gson().fromJson(sessionJson, OfflineStockTakeSession::class.java)
@@ -1518,7 +1534,7 @@ private fun loadSavedSessionById(context: Context, sessionId: String): OfflineSt
 
 private fun removeSavedSession(context: Context, sessionId: String) {
     try {
-        val sharedPrefs = context.getSharedPreferences("SavedSessions", Context.MODE_PRIVATE)
+        val sharedPrefs = context.getSharedPreferences(savedSessionsPrefsName(context), Context.MODE_PRIVATE)
         val sessionIds = sharedPrefs.getStringSet("session_ids", mutableSetOf())?.toMutableSet() ?: mutableSetOf()
         
         // Remove from session IDs list
