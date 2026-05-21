@@ -2313,7 +2313,13 @@ const writeAuditEntry = async (
 ): Promise<void> => {
   try {
     const ledgerRef = collection(firestore, 'organizations', organizationId, 'auditLedger');
-    await addDoc(ledgerRef, { ...entry, timestamp: serverTimestamp() });
+    // Firestore rejects undefined field values. Optional fields (e.g. sessionId on
+    // non-stock-take approvals, quantityDelta, etc.) can be undefined, so strip them
+    // out before writing rather than failing the whole audit entry.
+    const cleanEntry = Object.fromEntries(
+      Object.entries(entry).filter(([, v]) => v !== undefined)
+    );
+    await addDoc(ledgerRef, { ...cleanEntry, timestamp: serverTimestamp() });
   } catch (err) {
     // Audit write failures must never block the primary operation — log and continue.
     console.error('⚠️ Audit ledger write failed (non-fatal):', err);
