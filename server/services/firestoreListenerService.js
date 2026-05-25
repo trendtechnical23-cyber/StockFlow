@@ -76,9 +76,15 @@ class FirestoreListenerService {
      */
     startActivitiesListener() {
         console.log('🔥 Starting activities collection listener...');
-        
+
+        // Only listen to activities created AFTER the server started.
+        // Without this filter the initial snapshot loads the entire collection
+        // into memory which causes an OOM kill on Railway's container.
+        const listenFrom = admin.firestore.Timestamp.fromMillis(this.serverStartTime);
+
         const unsubscribe = this.db
             .collection('activities')
+            .where('timestamp', '>=', listenFrom)
             .onSnapshot(async (snapshot) => {
                 try {
                 for (const change of snapshot.docChanges()) {
