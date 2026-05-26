@@ -6,10 +6,16 @@ import { ZohoService } from './zohoService';
 import { API_ENDPOINTS } from '../utils/apiConfig';
 import { supabase, OrganizationDataService, serverTimestamp } from './supabase';
 
-// --- ORGANIZATION-CENTRIC FIRESTORE API SERVICE ---
+// --- ORGANIZATION-CENTRIC API SERVICE (Supabase) ---
 // All data is scoped to organizations for complete data isolation
 
 const orgDataService = OrganizationDataService.getInstance();
+
+// Stubs — prevent ReferenceError on functions not yet migrated to Supabase.
+// Functions that still use these will hit the `if (!firestore)` guard and
+// throw a controlled error instead of crashing the entire app.
+const firestore: any = null; // eslint-disable-line @typescript-eslint/no-unused-vars
+const auth: any = null;      // eslint-disable-line @typescript-eslint/no-unused-vars
 
 /**
  * Clear all local data and reset the application state
@@ -24,44 +30,33 @@ export const clearAllLocalData = async (): Promise<void> => {
  * Create a new organization with admin user
  * This is the entry point for new registrations
  */
-export const createOrganizationAndUser = async (params: { 
-  name: string, 
-  email: string, 
-  orgName: string, 
-  uid: string 
+export const createOrganizationAndUser = async (params: {
+  name: string,
+  email: string,
+  orgName: string,
+  uid: string | null
 }): Promise<{ user: User, organization: Organization }> => {
   console.log('🏢 Creating organization and admin user:', params.email);
-  
-  if (!firestore) {
-    throw new Error('Firestore not initialized');
-  }
 
-  // Clear any existing local data first
+  if (!params.uid) throw new Error('User ID is required to create an organization');
+
   await clearAllLocalData();
 
-  const organizationId = `org_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-  
+  const organizationId = crypto.randomUUID();
+
   const organizationData: Organization = {
     id: organizationId,
     name: params.orgName.trim(),
     plan: 'free' as const,
     createdAt: new Date(),
     ownerId: params.uid,
-    settings: {
-      lowStockThreshold: 10,
-      currency: 'ZAR',
-      timezone: 'Africa/Johannesburg'
-    },
+    settings: { lowStockThreshold: 10, currency: 'ZAR', timezone: 'Africa/Johannesburg' },
     categories: [],
-    integrations: {
-      zoho: {
-        status: 'disconnected' as const
-      }
-    },
+    integrations: { zoho: { status: 'disconnected' as const } },
     subscription: {
       plan: 'Free' as const,
       status: 'active' as const,
-      endDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString() // 30 days free trial
+      endDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
     }
   };
 
@@ -70,94 +65,61 @@ export const createOrganizationAndUser = async (params: {
     name: params.name.trim(),
     email: params.email.toLowerCase().trim(),
     role: UserRole.Admin,
-    organizationId: organizationId
+    organizationId
   };
 
   try {
     await orgDataService.createOrganization(organizationData, adminUserData);
-    
     console.log(`✅ Organization '${params.orgName}' created with admin user '${params.name}'`);
-    
-    return {
-      organization: organizationData,
-      user: adminUserData
-    };
-  } catch (error) {
+    return { organization: organizationData, user: adminUserData };
+  } catch (error: any) {
     console.error('❌ Error creating organization and user:', error);
     throw new Error(`Failed to create organization: ${error.message}`);
   }
 };
 
 /**
- * Gets user data by email across all organizations
+ * Gets user data by email — used during signup to detect invited users
  */
-export const getUserByEmail = async (email: string): Promise<{ 
-  user: User, 
-  organization: Organization, 
-  inventoryCount: number 
+export const getUserByEmail = async (email: string): Promise<{
+  user: User,
+  organization: Organization,
+  inventoryCount: number
 } | null> => {
   console.log('👤 Getting user data by email:', email);
-  
-  if (!firestore) {
-    console.warn('Firestore not initialized');
-    return null;
-  }
-
-  // Check if user is authenticated - required for searching organizations
-  const { data: { user: currentUser } } = await supabase.auth.getUser();
-  if (!currentUser) {
-    console.log('⚠️ getUserByEmail requires authentication - skipping');
-    return null;
-  }
-
   try {
-    // --- Fast path using email index (migration safe) ---
-    try {
-      const emailKey = email.toLowerCase();
-      const sanitizedKey = emailKey.replace(/[^a-z0-9@._-]/g, '_');
-      const emailIndexRef = doc(collection(firestore, 'userEmailIndex'), sanitizedKey);
-      const emailIndexSnap = await getDoc(emailIndexRef);
-      if (emailIndexSnap.exists()) {
-        const { organizationId, uid } = emailIndexSnap.data() as any;
-        if (organizationId && uid) {
-          const userRef = doc(orgDataService.getOrgCollection(organizationId, 'users'), uid);
-            const userSnap = await getDoc(userRef);
-            if (userSnap.exists()) {
-              const orgRef = doc(firestore, 'organizations', organizationId);
-              const orgSnap = await getDoc(orgRef);
-              if (orgSnap.exists()) {
-                const inventoryRef = orgDataService.getOrgCollection(organizationId, 'inventory');
-                const inventorySnapshot = await getDocs(inventoryRef);
-                const inventoryCount = inventorySnapshot.docs.filter(d => d.id !== '_init').length;
-                return {
-                  user: {
-                    uid: userSnap.id,
-                    name: userSnap.data().name,
-                    email: userSnap.data().email,
-                    role: userSnap.data().role,
-                    organizationId
-                  } as User,
-                  organization: {
-                    id: orgSnap.id,
-                    name: orgSnap.data().name,
-                    categories: orgSnap.data().categories || [],
-                    integrations: orgSnap.data().integrations || { zoho: { status: 'disconnected' } },
-                    subscription: orgSnap.data().subscription || { plan: 'Free', status: 'active' }
-                  } as Organization,
-                  inventoryCount
-                };
-              }
-            }
-        }
-      }
-    } catch (fastErr) {
-      console.log('⚠️ Email index fast-path failed:', fastErr.message);
-    }
+    const { data: userData, error: userErr } = await supabase
+      .from('users')
+      .select('*, organizations(*)')
+      .eq('email', email.toLowerCase().trim())
+      .maybeSingle();
 
-    // NO FALLBACK - never search across organizations
-    // If email index doesn't exist, user doesn't exist
-    console.log('👤 No user found with email (email index missing):', email);
-    return null;
+    if (userErr || !userData) return null;
+
+    const org = (userData as any).organizations;
+    const { data: invCount } = await supabase
+      .from('inventory_items')
+      .select('id', { count: 'exact', head: true })
+      .eq('org_id', userData.org_id);
+
+    return {
+      user: {
+        uid: userData.id,
+        name: userData.full_name ?? userData.email,
+        email: userData.email,
+        role: userData.role as UserRole,
+        organizationId: userData.org_id,
+        invited: !userData.is_active,
+      } as User,
+      organization: {
+        id: org?.id ?? userData.org_id,
+        name: org?.name ?? '',
+        categories: [],
+        integrations: { zoho: { status: 'disconnected' as const } },
+        subscription: { plan: 'Free' as const, status: 'active' as const }
+      } as Organization,
+      inventoryCount: (invCount as any)?.count ?? 0,
+    };
   } catch (error) {
     console.error('❌ Error getting user data by email:', error);
     return null;
@@ -168,81 +130,63 @@ export const getUserByEmail = async (email: string): Promise<{
  * Get user data and organization information
  * Validates user belongs to organization
  */
-export const getUserData = async (uid: string): Promise<{ 
-  user: User, 
-  organization: Organization, 
-  inventoryCount: number 
+export const getUserData = async (uid: string): Promise<{
+  user: User,
+  organization: Organization,
+  inventoryCount: number
 } | null> => {
   console.log('👤 Getting user data for UID:', uid);
-  
-  if (!firestore) {
-    console.warn('Firestore not initialized');
-    return null;
-  }
-
   try {
-    // --- Fast path using userIndex (migration safe) with a quick retry for propagation ---
+    // Retry up to 2 times to allow Supabase RPC replication to settle after signup
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
-        const userIndexRef = doc(collection(firestore, 'userIndex'), uid);
-        const userIndexSnap = await getDoc(userIndexRef);
-        if (userIndexSnap.exists()) {
-          console.log('📋 Found userIndex entry:', userIndexSnap.data());
-          const { organizationId } = userIndexSnap.data() as any;
-          if (organizationId) {
-            console.log('🏢 Looking up user in organization:', organizationId);
-            const userRef = doc(orgDataService.getOrgCollection(organizationId, 'users'), uid);
-            const orgRef = doc(firestore, 'organizations', organizationId);
-            const [userSnap, orgSnap] = await Promise.all([getDoc(userRef), getDoc(orgRef)]);
+        const { data: userData, error: userErr } = await supabase
+          .from('users')
+          .select('*, organizations(*)')
+          .eq('id', uid)
+          .maybeSingle();
 
-            if (userSnap.exists() && orgSnap.exists()) {
-              console.log('👤 Found user document:', userSnap.data());
-              console.log('🏢 Found organization document:', orgSnap.data());
-              const inventoryRef = orgDataService.getOrgCollection(organizationId, 'inventory');
-              const inventorySnapshot = await getDocs(inventoryRef);
-              const inventoryCount = inventorySnapshot.docs.filter(d => d.id !== '_init').length;
-              return {
-                user: {
-                  uid: userSnap.id,
-                  name: userSnap.data().name,
-                  email: userSnap.data().email,
-                  role: userSnap.data().role,
-                  organizationId,
-                  onboardingCompleted: userSnap.data().onboardingCompleted
-                } as User,
-                organization: {
-                  id: orgSnap.id,
-                  name: orgSnap.data().name,
-                  categories: orgSnap.data().categories || [],
-                  integrations: orgSnap.data().integrations || { zoho: { status: 'disconnected' } },
-                  subscription: orgSnap.data().subscription || { plan: 'Free', status: 'active' }
-                } as Organization,
-                inventoryCount
-              };
-            }
+        if (userErr) throw userErr;
 
-            console.warn('🧹 Stale userIndex entry detected for UID:', uid, 'Cleaning up...');
-            await deleteDoc(userIndexRef);
-          } else {
-            console.warn('🧹 userIndex entry missing organizationId for UID:', uid, 'Cleaning up...');
-            await deleteDoc(userIndexRef);
-          }
+        if (userData) {
+          const org = (userData as any).organizations;
+          const { count: invCount } = await supabase
+            .from('inventory_items')
+            .select('id', { count: 'exact', head: true })
+            .eq('org_id', userData.org_id)
+            .eq('is_active', true)
+            .then(r => ({ count: r.count ?? 0 }));
+
+          return {
+            user: {
+              uid: userData.id,
+              name: userData.full_name ?? userData.email,
+              email: userData.email,
+              role: userData.role as UserRole,
+              organizationId: userData.org_id,
+            } as User,
+            organization: {
+              id: org?.id ?? userData.org_id,
+              name: org?.name ?? '',
+              categories: [],
+              integrations: { zoho: { status: 'disconnected' as const } },
+              subscription: { plan: (org?.plan === 'pro' ? 'Pro' : 'Free') as any, status: 'active' as const }
+            } as Organization,
+            inventoryCount: invCount,
+          };
         }
-      } catch (fastErr: any) {
-        console.log('⚠️ userIndex fast-path failed (attempt', attempt, '):', fastErr?.message);
+
+      } catch (attemptErr: any) {
+        console.log(`⚠️ getUserData attempt ${attempt} failed:`, attemptErr?.message);
         if (attempt < 2) {
-          // Small delay to allow Firestore commit/propagation
           await new Promise(res => setTimeout(res, 800));
           continue;
         }
-        console.log('⚠️ Fast path error details:', fastErr);
       }
       break;
     }
 
-    // NO FALLBACK - never search across organizations
-    // If userIndex doesn't exist, user setup is incomplete
-    console.log('👤 No userIndex found for UID (user setup incomplete):', uid);
+    console.log('👤 No user row found in Supabase for UID (setup may be incomplete):', uid);
     return null;
   } catch (error) {
     console.error('❌ Error getting user data:', error);
@@ -251,13 +195,13 @@ export const getUserData = async (uid: string): Promise<{
 };
 
 /**
- * Mark onboarding as completed for a user (persisted in Firestore)
+ * Mark onboarding as completed for a user
  */
-export const markOnboardingComplete = async (organizationId: string, uid: string): Promise<void> => {
-  if (!firestore) return;
-  const userRef = doc(orgDataService.getOrgCollection(organizationId, 'users'), uid);
+export const markOnboardingComplete = async (_organizationId: string, uid: string): Promise<void> => {
   try {
-    await updateDoc(userRef, { onboardingCompleted: true });
+    // Onboarding state is tracked in localStorage only — no dedicated DB column yet
+    localStorage.setItem('onboardingCompleted', 'true');
+    console.log('✅ Onboarding marked complete for', uid);
   } catch (err) {
     console.warn('⚠️ Failed to mark onboarding complete (non-blocking):', (err as any)?.message);
   }
@@ -272,10 +216,6 @@ export const getOrganizationData = async (organizationId: string): Promise<{
   activityLogs: ActivityLogEntry[]
 }> => {
   console.log('🏢 Loading organization data:', organizationId);
-  
-  if (!firestore) {
-    throw new Error('Firestore not initialized');
-  }
 
   try {
     const data = await orgDataService.getAllOrganizationData(organizationId);
@@ -344,34 +284,32 @@ export const getOrganizationData = async (organizationId: string): Promise<{
  */
 export const addInventoryItem = async (item: Omit<InventoryItem, 'id'>, organizationId: string): Promise<InventoryItem> => {
   console.log('📦 Adding inventory item:', item.name);
-  
-  if (!firestore) {
-    throw new Error('Firestore not initialized');
-  }
-
   try {
-    const inventoryRef = orgDataService.getOrgCollection(organizationId, 'inventory');
-    
-    // Clean the item data by removing undefined values (Firestore doesn't allow them)
-    const cleanedItem = Object.fromEntries(
-      Object.entries(item).filter(([_, value]) => value !== undefined)
-    );
-    
-    const docRef = await addDoc(inventoryRef, {
-      ...cleanedItem,
-      organizationId,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp()
-    });
+    const { data, error } = await supabase
+      .from('inventory_items')
+      .insert({
+        org_id:       organizationId,
+        sku:          item.sku || `SKU-${Date.now()}`,
+        name:         item.name,
+        category:     item.category || null,
+        quantity:     item.stock ?? 0,
+        min_quantity: item.threshold ?? 10,
+        unit_price:   item.price ?? null,
+        cost_price:   item.cost ?? null,
+        unit:         item.unit ?? null,
+        location:     (item as any).location ?? null,
+        description:  item.description ?? null,
+        source:       item.source ?? 'manual',
+        is_active:    true,
+        is_priority:  (item as any).isPriority ?? false,
+      })
+      .select()
+      .single();
 
-    const newItem: InventoryItem = {
-      ...item,
-      id: docRef.id,
-      organizationId
-    };
+    if (error) throw error;
 
-  console.log('✅ Inventory item added:', newItem.id);
-  try { broadcastActivity(organizationId, { id: newItem.id, organizationId, user: auth?.currentUser?.email || 'system', action: `Added item: ${newItem.name}`, timestamp: new Date().toISOString(), type: 'INVENTORY_ADD', payload: { itemId: newItem.id, name: newItem.name, stock: newItem.stock } }); } catch {}
+    const newItem: InventoryItem = { ...item, id: data.id, organizationId };
+    console.log('✅ Inventory item added:', newItem.id);
     return newItem;
   } catch (error) {
     console.error('❌ Error adding inventory item:', error);
@@ -384,26 +322,28 @@ export const addInventoryItem = async (item: Omit<InventoryItem, 'id'>, organiza
  */
 export const updateInventoryItem = async (item: InventoryItem, organizationId: string): Promise<void> => {
   console.log('📦 Updating inventory item:', item.id);
-  
-  if (!firestore) {
-    throw new Error('Firestore not initialized');
-  }
-
   try {
-    const itemRef = doc(orgDataService.getOrgCollection(organizationId, 'inventory'), item.id);
-    
-    // Clean the item data by removing undefined values (Firestore doesn't allow them)
-    const cleanedItem = Object.fromEntries(
-      Object.entries(item).filter(([_, value]) => value !== undefined)
-    );
-    
-    await updateDoc(itemRef, {
-      ...cleanedItem,
-      updatedAt: serverTimestamp()
-    });
-    
+    const { error } = await supabase
+      .from('inventory_items')
+      .update({
+        name:         item.name,
+        category:     item.category || null,
+        quantity:     item.stock ?? 0,
+        min_quantity: item.threshold ?? 10,
+        unit_price:   item.price ?? null,
+        cost_price:   item.cost ?? null,
+        unit:         item.unit ?? null,
+        location:     (item as any).location ?? null,
+        description:  item.description ?? null,
+        source:       item.source ?? 'manual',
+        is_priority:  (item as any).isPriority ?? false,
+        updated_at:   new Date().toISOString(),
+      })
+      .eq('id', item.id)
+      .eq('org_id', organizationId);
+
+    if (error) throw error;
     console.log('✅ Inventory item updated:', item.id);
-  try { broadcastActivity(organizationId, { id: item.id, organizationId, user: auth?.currentUser?.email || 'system', action: `Updated item: ${item.name}`, timestamp: new Date().toISOString(), type: 'INVENTORY_UPDATE', payload: { itemId: item.id } }); } catch {}
   } catch (error) {
     console.error('❌ Error updating inventory item:', error);
     throw error;
@@ -411,21 +351,19 @@ export const updateInventoryItem = async (item: InventoryItem, organizationId: s
 };
 
 /**
- * Delete inventory item
+ * Delete inventory item (soft delete — sets is_active = false)
  */
 export const deleteInventoryItem = async (itemId: string, organizationId: string): Promise<void> => {
   console.log('🗑️ Deleting inventory item:', itemId);
-  
-  if (!firestore) {
-    throw new Error('Firestore not initialized');
-  }
-
   try {
-    const itemRef = doc(orgDataService.getOrgCollection(organizationId, 'inventory'), itemId);
-    await deleteDoc(itemRef);
-    
-  console.log('✅ Inventory item deleted:', itemId);
-  try { broadcastActivity(organizationId, { id: itemId, organizationId, user: auth?.currentUser?.email || 'system', action: `Deleted item: ${itemId}`, timestamp: new Date().toISOString(), type: 'INVENTORY_DELETE', payload: { itemId } }); } catch {}
+    const { error } = await supabase
+      .from('inventory_items')
+      .update({ is_active: false, updated_at: new Date().toISOString() })
+      .eq('id', itemId)
+      .eq('org_id', organizationId);
+
+    if (error) throw error;
+    console.log('✅ Inventory item deleted:', itemId);
   } catch (error) {
     console.error('❌ Error deleting inventory item:', error);
     throw error;

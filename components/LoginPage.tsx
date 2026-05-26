@@ -405,8 +405,7 @@ const LoginPage: React.FC = () => {
         // Step 3b: New org path
         if (!orgName.trim()) {
           addToast('Organization name is required', 'error');
-          // Delete the auth account so the user can retry
-          await supabase.auth.admin?.deleteUser(userId!).catch(() => {});
+          await supabase.auth.signOut().catch(() => {});
           return;
         }
         await createOrganizationAndUser({
@@ -426,15 +425,9 @@ const LoginPage: React.FC = () => {
       console.error('Signup error:', error);
       localStorage.removeItem('signup_in_progress');
 
-      // If the Supabase auth account was created but DB work failed, clean up.
+      // If DB work failed after auth was created, sign the user out so they can retry cleanly.
       if (userId) {
-        try {
-          await supabase.auth.admin?.deleteUser(userId);
-          console.log('Cleaned up orphaned auth account after DB failure');
-        } catch (deleteErr) {
-          // If cleanup itself fails, log it but don't mask the original error.
-          console.error('Failed to clean up orphaned auth account:', deleteErr);
-        }
+        await supabase.auth.signOut().catch(() => {});
       }
 
       if (error.code === 'auth/email-already-in-use') {
