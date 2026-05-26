@@ -1,13 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { auth, isFirebaseInitialized } from '../services/firebase';
-import { 
-  createUserWithEmailAndPassword, 
-  signInWithEmailAndPassword, 
-  // GoogleAuthProvider, 
-  // signInWithRedirect,
-  // getRedirectResult,
-  sendPasswordResetEmail 
-} from 'firebase/auth';
+import { supabase, signIn as supabaseSignIn, signUp as supabaseSignUp } from '../services/supabase';
 import { createOrganizationAndUser, clearAllLocalData, getUserData } from '../services/apiService';
 import { useToast } from '../hooks/useToast';
 
@@ -244,7 +236,7 @@ const LoginPage: React.FC = () => {
 
   // Don't clear data automatically - let users keep their settings
 
-  if (!isFirebaseInitialized()) {
+  if (!supabase) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 via-white to-gray-50 dark:from-gray-900 dark:via-gray-800 dark:to-gray-900 px-4">
         <FirebaseNotConfigured />
@@ -340,17 +332,19 @@ const LoginPage: React.FC = () => {
     // ── Sign-in path ───────────────────────────────────────────────────────
     if (!isSignUp) {
       try {
-        await signInWithEmailAndPassword(auth!, email.trim(), password);
+        const { error: signInError } = await supabaseSignIn(email.trim(), password);
+        if (signInError) throw signInError;
         addToast('Welcome back! Signed in successfully.', 'success');
       } catch (error: any) {
         console.error('Sign-in error:', error);
-        if (error.code === 'auth/user-not-found' || error.code === 'auth/invalid-credential' || error.code === 'auth/wrong-password') {
+        const msg = error.message || '';
+        if (msg.includes('Invalid login') || msg.includes('invalid_credentials')) {
           addToast('Invalid email or password. Please check your credentials and try again.', 'error');
-        } else if (error.code === 'auth/too-many-requests') {
+        } else if (msg.includes('rate') || msg.includes('too many')) {
           addToast('Too many failed attempts. Please try again later.', 'error');
           handleRateLimit();
         } else {
-          addToast(error.message || 'Sign-in failed. Please try again.', 'error');
+          addToast(msg || 'Sign-in failed. Please try again.', 'error');
         }
       } finally {
         setIsLoading(false);
@@ -370,14 +364,19 @@ const LoginPage: React.FC = () => {
     //   can't sign in (app signs them out) and can't re-signup (email taken).
     //   We delete the auth account in the catch block so they can retry cleanly.
 
-    let userCredential: Awaited<ReturnType<typeof createUserWithEmailAndPassword>> | null = null;
+    let userId: string | null = null;
 
     try {
-      // Signal to App.tsx that a signup is in progress so it retries instead of signing out.
       localStorage.setItem('signup_in_progress', Date.now().toString());
 
-      // Step 1: Create the Firebase auth account.
-      userCredential = await createUserWithEmailAndPassword(auth!, email.trim(), password);
+      // Step 1: Create the Supabase auth account.
+      const { data: signUpData, error: signUpError } = await supabaseSignUp(
+        email.trim(),
+        password,
+        { full_name: name.trim() }
+      );
+      if (signUpError) throw signUpError;
+      userId = signUpData.user?.id ?? null;
 
       localStorage.removeItem('currentView');
       localStorage.removeItem('pendingView');
@@ -396,24 +395,25 @@ const LoginPage: React.FC = () => {
         const { updateUserInOrganization } = await import('../services/apiService');
         await updateUserInOrganization({
           ...invitedUser.user,
-          uid: userCredential.user.uid,
+          uid: userId,
           name: name.trim() || invitedUser.user.name,
           invited: false
         });
         setInviteInfo({ orgName: invitedUser.organization.name });
         addToast(`Welcome to ${invitedUser.organization.name}! Your account has been activated.`, 'success');
       } else {
-        // Step 3b: New org path — validate orgName here since we now know they're not invited.
+        // Step 3b: New org path
         if (!orgName.trim()) {
           addToast('Organization name is required', 'error');
-          await userCredential!.user.delete();
+          // Delete the auth account so the user can retry
+          await supabase.auth.admin?.deleteUser(userId!).catch(() => {});
           return;
         }
         await createOrganizationAndUser({
           name: name.trim(),
           email: email.toLowerCase().trim(),
           orgName: orgName.trim(),
-          uid: userCredential.user.uid
+          uid: userId
         });
         addToast(`Welcome to StockFlow! Organization '${orgName}' created successfully.`, 'success');
       }
@@ -426,12 +426,11 @@ const LoginPage: React.FC = () => {
       console.error('Signup error:', error);
       localStorage.removeItem('signup_in_progress');
 
-      // If the Firebase auth account was created but Firestore failed, delete the
-      // auth account so the user is NOT permanently locked out (can re-signup).
-      if (userCredential?.user) {
+      // If the Supabase auth account was created but DB work failed, clean up.
+      if (userId) {
         try {
-          await userCredential.user.delete();
-          console.log('Cleaned up orphaned auth account after Firestore failure');
+          await supabase.auth.admin?.deleteUser(userId);
+          console.log('Cleaned up orphaned auth account after DB failure');
         } catch (deleteErr) {
           // If cleanup itself fails, log it but don't mask the original error.
           console.error('Failed to clean up orphaned auth account:', deleteErr);
@@ -487,7 +486,8 @@ const LoginPage: React.FC = () => {
     setIsLoading(true);
 
     try {
-      await sendPasswordResetEmail(auth!, resetEmail.trim());
+      const { error: resetError } = await supabase.auth.resetPasswordForEmail(resetEmail.trim());
+      if (resetError) throw resetError;
       addToast('Password reset email sent! Check your inbox.', 'success');
       setShowForgotPassword(false);
       setResetEmail('');

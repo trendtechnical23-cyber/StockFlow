@@ -13,8 +13,8 @@ import { activityLogger } from './services/activityLogger';
 import { useToast } from './hooks/useToast';
 import { useIdleTimer } from './hooks/useIdleTimer';
 import useNotifications from './hooks/useNotifications';
-import { auth } from './services/firebase';
-import type { User as FirebaseUser } from 'firebase/auth';
+import { supabase, signOut as supabaseSignOut } from './services/supabase';
+import type { User as SupabaseUser } from '@supabase/supabase-js';
 // Import user invite helper for console access
 import './utils/userInviteHelper';
 // Import FCM messaging
@@ -39,7 +39,7 @@ const Spinner: React.FC<{ message?: string }> = ({ message }) => (
 
 const AppContent: React.FC = () => {
   const [authData, setAuthData] = useState<AuthData | null>(null);
-  const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
+  const [firebaseUser, setFirebaseUser] = useState<SupabaseUser | null>(null);
   const [needsOnboarding, setNeedsOnboarding] = useState(false);
   const [onboardingCompleted, setOnboardingCompleted] = useState(() => {
     // Check localStorage for persistent onboarding state
@@ -97,9 +97,7 @@ const AppContent: React.FC = () => {
       type: 'info' 
     });
     
-    if (auth) {
-      await auth.signOut();
-    }
+    await supabaseSignOut();
   }, [addToast]);
 
   // Handle idle timeout - show warning modal
@@ -195,15 +193,10 @@ const AppContent: React.FC = () => {
 
   useEffect(() => {
     // Guard against unconfigured Firebase
-    if (!auth) {
-        console.log('⚠️ Firebase auth not initialized');
-        setIsLoading(false);
-        return;
-    }
+    console.log('🔐 Setting up Supabase auth state listener');
 
-    console.log('🔐 Setting up auth state listener (one-time setup)');
-    
-    const unsubscribe = auth.onAuthStateChanged(async (user) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      const user = session?.user ?? null;
       try {
         // Mounted guard to avoid state updates after unmount
         if (!mountedRef.current) {
@@ -211,15 +204,15 @@ const AppContent: React.FC = () => {
           return;
         }
         
-        console.log('🔐 Auth state changed. User:', user ? `${user.email} (${user.uid})` : 'null');
+        console.log('🔐 Auth state changed. User:', user ? `${user.email} (${user.id})` : 'null');
         setIsLoading(true);
         if (user) {
         // Reset onboarding flag when switching accounts or for new users
         const storedOnboardingUid = localStorage.getItem('onboardingUid');
-        console.log('🔍 UID check:', { storedUid: storedOnboardingUid, currentUid: user.uid, isNewUser: storedOnboardingUid !== user.uid });
-        if (storedOnboardingUid !== user.uid) {
+        console.log('🔍 UID check:', { storedUid: storedOnboardingUid, currentUid: user.id, isNewUser: storedOnboardingUid !== user.id });
+        if (storedOnboardingUid !== user.id) {
           console.log('🔄 New user or different user detected, clearing onboarding state');
-          localStorage.setItem('onboardingUid', user.uid);
+          localStorage.setItem('onboardingUid', user.id);
           localStorage.removeItem('onboardingCompleted');
           localStorage.removeItem('currentView'); // Clear stored view to start fresh
           localStorage.removeItem('pendingView'); // Clear any pending view redirects
@@ -240,7 +233,7 @@ const AppContent: React.FC = () => {
           console.log('👤 Fetching user data for:', user.email);
           console.log('🔍 Pre-fetch onboarding state:', { onboardingCompleted });
           setLoadingMessage('Checking user profile...');
-          const result = await api.getUserData(user.uid);
+          const result = await api.getUserData(user.id);
           
           if (result) {
             console.log('✅ User data loaded successfully:', result.user.name, 'from org:', result.organization.name);
@@ -251,7 +244,7 @@ const AppContent: React.FC = () => {
             if (completed) {
               setOnboardingCompleted(true);
               localStorage.setItem('onboardingCompleted', 'true');
-              localStorage.setItem('onboardingUid', user.uid);
+              localStorage.setItem('onboardingUid', user.id);
             }
             
             // Store organization ID for FCM token storage
@@ -308,7 +301,7 @@ const AppContent: React.FC = () => {
               for (let attempt = 1; attempt <= 5; attempt++) {
                 await new Promise(r => setTimeout(r, attempt * 1000));
                 console.log(`🔄 Retry attempt ${attempt}/5`);
-                retryResult = await api.getUserData(user.uid);
+                retryResult = await api.getUserData(user.id);
                 if (retryResult) break;
               }
 
@@ -318,7 +311,7 @@ const AppContent: React.FC = () => {
                 if (completed) {
                   setOnboardingCompleted(true);
                   localStorage.setItem('onboardingCompleted', 'true');
-                  localStorage.setItem('onboardingUid', user.uid);
+                  localStorage.setItem('onboardingUid', user.id);
                 }
                 localStorage.setItem('organizationId', retryResult.organization.id);
                 setAuthData({ user: retryResult.user, organization: retryResult.organization });
@@ -332,12 +325,12 @@ const AppContent: React.FC = () => {
               } else {
                 console.log('❌ Profile still not found after retries — signing out');
                 addToast({ message: 'Account setup incomplete. Please try signing up again.', type: 'error' });
-                if (auth) await auth.signOut();
+                await supabaseSignOut();
               }
             } else {
               console.log('⚠️ Existing user with no profile — signing out');
               addToast({ message: 'Account setup incomplete. Please try signing up again.', type: 'error' });
-              if (auth) await auth.signOut();
+              await supabaseSignOut();
             }
           }
         } catch (error: any) {
@@ -360,7 +353,7 @@ const AppContent: React.FC = () => {
           
           // Sign out user on data fetch errors (except database setup issues)
           if (!error.message.includes('Firestore') && !error.message.includes('timeout')) {
-            if(auth) await auth.signOut();
+            await supabaseSignOut();
           }
         } finally {
           isLoadingUserDataRef.current = false;
@@ -397,8 +390,8 @@ const AppContent: React.FC = () => {
     });
     
     return () => {
-      console.log('🔐 Cleaning up auth state listener');
-      unsubscribe();
+      console.log('🔐 Cleaning up Supabase auth state listener');
+      subscription.unsubscribe();
     };
   }, []); // Empty deps - subscribe only once on mount
   
@@ -430,7 +423,7 @@ const AppContent: React.FC = () => {
       const items = await api.getZohoItems(authData.organization.id);
       await api.importFromZoho(items, authData.organization.id);
       // Re-fetch data to reflect imported items
-      const result = await api.getUserData(authData.user.uid);
+      const result = await api.getUserData(authData.user.id);
       if (result) {
         setAuthData({ user: result.user, organization: result.organization });
       }
@@ -503,9 +496,7 @@ const AppContent: React.FC = () => {
     stopIdleTimer();
     setShowIdleWarning(false);
     
-    if (auth) {
-        await auth.signOut();
-    }
+    await supabaseSignOut();
   }, [stopIdleTimer]);
 
   // Start/stop idle timer based on authentication state  

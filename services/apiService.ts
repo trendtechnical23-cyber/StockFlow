@@ -4,27 +4,7 @@ import { broadcastActivity } from '../serverBroadcast';
 import { MOCK_ZOHO_IMPORT } from '../constants';
 import { ZohoService } from './zohoService';
 import { API_ENDPOINTS } from '../utils/apiConfig';
-import { 
-  auth,
-  firestore, 
-  database,
-  OrganizationDataService,
-  doc,
-  collection,
-  query,
-  where,
-  orderBy,
-  limit,
-  getDocs,
-  getDoc,
-  setDoc,
-  updateDoc,
-  deleteDoc,
-  addDoc,
-  serverTimestamp,
-  writeBatch
-} from './firebase';
-import { getDatabase, ref, remove } from 'firebase/database';
+import { supabase, OrganizationDataService, serverTimestamp } from './supabase';
 
 // --- ORGANIZATION-CENTRIC FIRESTORE API SERVICE ---
 // All data is scoped to organizations for complete data isolation
@@ -124,7 +104,8 @@ export const getUserByEmail = async (email: string): Promise<{
   }
 
   // Check if user is authenticated - required for searching organizations
-  if (!auth.currentUser) {
+  const { data: { user: currentUser } } = await supabase.auth.getUser();
+  if (!currentUser) {
     console.log('⚠️ getUserByEmail requires authentication - skipping');
     return null;
   }
@@ -550,7 +531,8 @@ export const createUserWithOrganization = async (
     if (password) {
       // Create user via backend API to prevent auto-login
       try {
-        const token = await auth.currentUser?.getIdToken();
+        const { data: { session } } = await supabase.auth.getSession();
+        const token = session?.access_token;
         if (!token) {
           throw new Error('Authentication token not available');
         }
@@ -631,7 +613,7 @@ export const createUserWithOrganization = async (
         organizationId, 
         userData.email, 
         userData.role,
-        auth.currentUser?.email || 'system'
+        (await supabase.auth.getUser()).data.user?.email || 'system'
       );
     } catch (logError) {
       console.warn('⚠️ Failed to log user creation:', logError);
@@ -727,7 +709,7 @@ export const removeUserFromOrganization = async (userId: string, organizationId:
       await activityLogger.logUserDeletion(
         organizationId, 
         userEmail, 
-        auth.currentUser?.email || 'system'
+        (await supabase.auth.getUser()).data.user?.email || 'system'
       );
     } catch (logError) {
       console.warn('⚠️ Failed to log user deletion:', logError);
@@ -738,7 +720,7 @@ export const removeUserFromOrganization = async (userId: string, organizationId:
       await activityLogger.logUserDeletion(
         organizationId, 
         userEmail, 
-        auth.currentUser?.email || 'system'
+        (await supabase.auth.getUser()).data.user?.email || 'system'
       );
     } catch (logError) {
       console.warn('⚠️ Failed to log user deletion:', logError);
