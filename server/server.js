@@ -30,9 +30,9 @@ const buildAllowedOrigins = () => {
     'http://localhost:3000',
     'http://localhost:3001',
     'http://localhost:5173',
-    'https://stockflow-dashboard-a1aa6.web.app',
-    'https://stockflow-dashboard-a1aa6.firebaseapp.com',
   ]);
+  // Add production origins via env vars — set CLIENT_URL and/or CORS_ORIGINS in Railway
+  // CORS_ORIGINS accepts a comma-separated list, e.g. https://stockflow.vercel.app,https://custom.domain.com
   [process.env.CLIENT_URL, process.env.CORS_ORIGINS].forEach(envVal => {
     if (envVal) envVal.split(',').map(u => u.trim()).filter(Boolean).forEach(u => origins.add(u));
   });
