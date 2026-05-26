@@ -5,21 +5,25 @@
  * Get the correct API base URL based on environment and access method
  */
 export const getApiBaseUrl = (): string => {
+  // Strip any trailing slashes so concatenations like `${BASE}/health`
+  // never produce a double slash (`//health`), which 404s and breaks CORS.
+  const stripTrailingSlash = (url: string) => url.replace(/\/+$/, '');
+
   // Check if there's an environment variable override
   const envApiUrl = import.meta.env.VITE_API_BASE_URL;
   if (envApiUrl) {
-    return envApiUrl;
+    return stripTrailingSlash(envApiUrl);
   }
 
   // Auto-detect based on current window location
   if (typeof window !== 'undefined') {
     const currentHost = window.location.hostname;
-    
+
     // If accessing via localhost, use localhost for API
     if (currentHost === 'localhost' || currentHost === '127.0.0.1') {
       return 'http://localhost:4000';
     }
-    
+
     // If accessing via IP address or network, use the same host for API
     return `http://${currentHost}:4000`;
   }

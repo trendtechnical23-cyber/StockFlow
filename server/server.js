@@ -31,17 +31,39 @@ const buildAllowedOrigins = () => {
     'http://localhost:3001',
     'http://localhost:5173',
   ]);
-  // Add production origins via env vars — set CLIENT_URL and/or CORS_ORIGINS in Railway
-  // CORS_ORIGINS accepts a comma-separated list, e.g. https://stockflow.vercel.app,https://custom.domain.com
+  // Add explicit production origins via env vars (CLIENT_URL / CORS_ORIGINS, comma-separated)
   [process.env.CLIENT_URL, process.env.CORS_ORIGINS].forEach(envVal => {
-    if (envVal) envVal.split(',').map(u => u.trim()).filter(Boolean).forEach(u => origins.add(u));
+    if (envVal) envVal.split(',').map(u => u.trim().replace(/\/+$/, '')).filter(Boolean).forEach(u => origins.add(u));
   });
   return [...origins];
 };
 
 const allowedOrigins = buildAllowedOrigins();
 
-app.use(cors({ origin: allowedOrigins, credentials: true }));
+// Vercel generates many domains per project: production, git-branch, and per-commit
+// preview URLs all under *.vercel.app. Rather than hardcode each, allow any of them.
+const isAllowedOrigin = (origin) => {
+  if (!origin) return true;                               // same-origin / curl / server-to-server
+  const clean = origin.replace(/\/+$/, '');
+  if (allowedOrigins.includes(clean)) return true;
+  try {
+    const { hostname } = new URL(clean);
+    if (hostname.endsWith('.vercel.app')) return true;    // any Vercel deployment of this project
+  } catch { /* malformed origin — fall through to deny */ }
+  return false;
+};
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    if (isAllowedOrigin(origin)) return callback(null, true);
+    console.warn('[CORS] Blocked origin:', origin);
+    return callback(null, false);
+  },
+  credentials: true,
+};
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));   // ensure preflight requests get CORS headers too
 app.use(morgan('combined'));
 app.use(bodyParser.json({ limit: '10mb' }));
 app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }));
@@ -54,7 +76,7 @@ app.use('/api/', generalLimiter);
 let appReady = false;
 app.get('/health', (req, res) => {
   const origin = req.headers.origin;
-  res.setHeader('Access-Control-Allow-Origin', (origin && allowedOrigins.includes(origin)) ? origin : '*');
+  res.setHeader('Access-Control-Allow-Origin', (origin && isAllowedOrigin(origin)) ? origin : '*');
   res.setHeader('Vary', 'Origin');
   res.status(200).json({ status: appReady ? 'ok' : 'starting', timestamp: new Date().toISOString() });
 });

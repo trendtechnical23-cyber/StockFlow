@@ -20,6 +20,31 @@ const orgDataService = OrganizationDataService.getInstance();
 const firestore: any = null; // eslint-disable-line @typescript-eslint/no-unused-vars
 const auth: any = null;      // eslint-disable-line @typescript-eslint/no-unused-vars
 
+// Firestore SDK primitive stubs. Any not-yet-migrated function that calls these
+// throws a CATCHABLE error (handled by the function's own try/catch) instead of
+// a raw `ReferenceError: X is not defined` that would crash a React render.
+const _firestoreRemoved = (): never => {
+  throw new Error('This feature is not yet migrated from Firestore to Supabase');
+};
+const collection: any = _firestoreRemoved;
+const doc: any        = _firestoreRemoved;
+const getDoc: any     = _firestoreRemoved;
+const getDocs: any    = _firestoreRemoved;
+const addDoc: any     = _firestoreRemoved;
+const updateDoc: any  = _firestoreRemoved;
+const deleteDoc: any  = _firestoreRemoved;
+const setDoc: any     = _firestoreRemoved;
+const query: any      = _firestoreRemoved;
+const where: any      = _firestoreRemoved;
+const orderBy: any    = _firestoreRemoved;
+const limit: any      = _firestoreRemoved;
+const writeBatch: any = _firestoreRemoved;
+const onSnapshot: any = _firestoreRemoved;
+const runTransaction: any = _firestoreRemoved;
+const increment: any  = _firestoreRemoved;
+const arrayUnion: any  = _firestoreRemoved;
+const arrayRemove: any = _firestoreRemoved;
+
 /**
  * Clear all local data and reset the application state
  * This is called when starting fresh or switching organizations
@@ -2315,17 +2340,16 @@ export interface ApprovalRequest {
  */
 export const getApprovals = async (organizationId: string): Promise<ApprovalRequest[]> => {
   try {
-    const approvalsRef = collection(firestore, 'organizations', organizationId, 'approvals');
-    const q = query(approvalsRef, orderBy('requestedAt', 'desc'));
-    const snapshot = await getDocs(q);
-    
-    return snapshot.docs.map(doc => ({
-      id: doc.id,
-      ...doc.data()
-    })) as ApprovalRequest[];
+    const { data, error } = await supabase
+      .from('approval_requests')
+      .select('*')
+      .eq('org_id', organizationId)
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    return (data ?? []) as unknown as ApprovalRequest[];
   } catch (error) {
     console.error('Error fetching approvals:', error);
-    throw new Error('Failed to fetch approvals');
+    return []; // Non-critical — return empty so callers (e.g. pending count) don't break
   }
 };
 
