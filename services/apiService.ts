@@ -93,17 +93,17 @@ export const getUserByEmail = async (email: string): Promise<{
   try {
     const { data: userData, error: userErr } = await supabase
       .from('users')
-      .select('*, organizations(*)')
+      .select('*')
       .eq('email', email.toLowerCase().trim())
       .maybeSingle();
 
     if (userErr || !userData) return null;
 
-    const org = (userData as any).organizations;
-    const { data: invCount } = await supabase
-      .from('inventory_items')
-      .select('id', { count: 'exact', head: true })
-      .eq('org_id', userData.org_id);
+    const { data: orgData } = await supabase
+      .from('organizations')
+      .select('*')
+      .eq('id', userData.org_id)
+      .maybeSingle();
 
     return {
       user: {
@@ -115,13 +115,13 @@ export const getUserByEmail = async (email: string): Promise<{
         invited: !userData.is_active,
       } as User,
       organization: {
-        id: org?.id ?? userData.org_id,
-        name: org?.name ?? '',
+        id: orgData?.id ?? userData.org_id,
+        name: orgData?.name ?? '',
         categories: [],
         integrations: { zoho: { status: 'disconnected' as const } },
         subscription: { plan: 'Free' as const, status: 'active' as const }
       } as Organization,
-      inventoryCount: (invCount as any)?.count ?? 0,
+      inventoryCount: 0,
     };
   } catch (error) {
     console.error('❌ Error getting user data by email:', error);
@@ -145,14 +145,20 @@ export const getUserData = async (uid: string): Promise<{
       try {
         const { data: userData, error: userErr } = await supabase
           .from('users')
-          .select('*, organizations(*)')
+          .select('*')
           .eq('id', uid)
           .maybeSingle();
 
         if (userErr) throw userErr;
 
         if (userData) {
-          const org = (userData as any).organizations;
+          // Fetch org separately to avoid PostgREST embedded join 500 errors
+          const { data: orgData } = await supabase
+            .from('organizations')
+            .select('*')
+            .eq('id', userData.org_id)
+            .maybeSingle();
+
           const { count: invCount } = await supabase
             .from('inventory_items')
             .select('id', { count: 'exact', head: true })
@@ -169,13 +175,13 @@ export const getUserData = async (uid: string): Promise<{
               organizationId: userData.org_id,
             } as User,
             organization: {
-              id: org?.id ?? userData.org_id,
-              name: org?.name ?? '',
+              id: orgData?.id ?? userData.org_id,
+              name: orgData?.name ?? '',
               categories: [],
               integrations: { zoho: { status: 'disconnected' as const } },
-              subscription: { plan: (org?.plan === 'pro' ? 'Pro' : 'Free') as any, status: 'active' as const }
+              subscription: { plan: (orgData?.plan === 'pro' ? 'Pro' : 'Free') as any, status: 'active' as const }
             } as Organization,
-            inventoryCount: invCount,
+            inventoryCount: invCount ?? 0,
           };
         }
 
