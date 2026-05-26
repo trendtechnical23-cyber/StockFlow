@@ -39,6 +39,12 @@ export const getSession = () => supabase.auth.getSession();
 
 export const getUser = () => supabase.auth.getUser();
 
+/** Returns the current JWT access token for authenticating backend (Railway) API calls. */
+export const getAccessToken = async (): Promise<string | null> => {
+  const { data: { session } } = await supabase.auth.getSession();
+  return session?.access_token ?? null;
+};
+
 /** Listen to auth state changes — drop-in replacement for onAuthStateChanged */
 export const onAuthStateChange = (
   callback: (event: string, session: any) => void

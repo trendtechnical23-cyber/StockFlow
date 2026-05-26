@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { API_ENDPOINTS, API_BASE_URL } from '../utils/apiConfig';
-import { auth } from '../services/firebase';
+import { getAccessToken } from '../services/supabase';
 
 export interface ZohoOrgConfig {
   clientId: string;
@@ -45,7 +45,7 @@ const ZohoSetupModal: React.FC<ZohoSetupModalProps> = ({ isOpen, onClose, orgId,
     if (!isOpen || !orgId) return;
     const load = async () => {
       try {
-        const token = await auth.currentUser?.getIdToken();
+        const token = await getAccessToken();
         const res = await fetch(`${API_ENDPOINTS.zohoConfig}?orgId=${encodeURIComponent(orgId)}`, {
           headers: token ? { Authorization: `Bearer ${token}` } : {},
         });
@@ -78,7 +78,7 @@ const ZohoSetupModal: React.FC<ZohoSetupModalProps> = ({ isOpen, onClose, orgId,
     setError('');
 
     try {
-      const token = await auth.currentUser?.getIdToken();
+      const token = await getAccessToken();
       const res = await fetch(API_ENDPOINTS.zohoConfig, {
         method: 'POST',
         headers: {

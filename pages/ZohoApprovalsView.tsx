@@ -3,7 +3,7 @@ import { useAppContext } from '../context/AppContext';
 import { useToast } from '../hooks/useToast';
 import * as api from '../services/apiService';
 import { API_ENDPOINTS } from '../utils/apiConfig';
-import { auth } from '../services/firebase';
+import { getAccessToken } from '../services/supabase';
 import { UserRole } from '../types';
 import { CheckCircle, XCircle, Clock, AlertTriangle, User, Calendar, FileText, TrendingUp, TrendingDown, RefreshCw } from 'lucide-react';
 import type { AuditLedgerEntry } from '../types';
@@ -412,7 +412,7 @@ const ZohoApprovalsView: React.FC = () => {
       addToast({ message: `Sending ${itemsInSession} items to Zoho Books as one batch adjustment…`, type: 'info' });
 
       try {
-        const token = await auth.currentUser?.getIdToken();
+        const token = await getAccessToken();
         const res = await fetch(API_ENDPOINTS.zohoProcessSession(currentOrg.id), {
           method: 'POST',
           headers: {

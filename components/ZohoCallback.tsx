@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useAppContext } from '../context/AppContext';
 import { useToast } from '../hooks/useToast';
 import { API_ENDPOINTS } from '../utils/apiConfig';
-import { auth } from '../services/firebase';
+import { getAccessToken } from '../services/supabase';
 
 interface ZohoCallbackProps {
     code: string;
@@ -46,11 +46,10 @@ const ZohoCallback: React.FC<ZohoCallbackProps> = ({ code, state, onComplete, on
 
                 setStatus('Exchanging authorization code for tokens...');
 
-                if (!auth.currentUser) {
+                const idToken = await getAccessToken();
+                if (!idToken) {
                     throw new Error('User not authenticated. Please log in and try again.');
                 }
-
-                const idToken = await auth.currentUser.getIdToken();
                 const response = await fetch(API_ENDPOINTS.zohoAuthCallback, {
                     method: 'POST',
                     headers: {

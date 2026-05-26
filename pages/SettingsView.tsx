@@ -6,8 +6,7 @@ import UserManagementModal from '../components/UserManagementModal';
 import ConfirmationModal from '../components/ConfirmationModal';
 import { useToast } from '../hooks/useToast';
 import { requestDataExport, requestDataDeletion, updateOrganizationAPI, updateUserInOrganization, updateOrganizationSettings } from '../services/apiService';
-import { auth } from '../services/firebase';
-import { updateProfile, updateEmail, updatePassword, reauthenticateWithCredential, EmailAuthProvider } from 'firebase/auth';
+import { supabase } from '../services/supabase';
 
 const APP_VERSION = '1.2.1';
 
@@ -269,7 +268,8 @@ const SettingsView: React.FC = () => {
         setIsSavingProfile(true);
 
         try {
-            if (!auth.currentUser) throw new Error('No authenticated user found');
+            const { data: { user: authUser } } = await supabase.auth.getUser();
+            if (!authUser) throw new Error('No authenticated user found');
 
             if (profileData.name !== currentUser.name) {
                 await activityLogger.logNameChange(
@@ -279,7 +279,9 @@ const SettingsView: React.FC = () => {
                     currentUser.name || 'Unknown',
                     profileData.name
                 );
-                await updateProfile(auth.currentUser, { displayName: profileData.name });
+                // Update display name in Supabase auth metadata + public.users row
+                await supabase.auth.updateUser({ data: { full_name: profileData.name } });
+                await supabase.from('users').update({ full_name: profileData.name }).eq('id', authUser.id);
             }
 
             if (profileData.email !== currentUser.email) {
@@ -294,7 +296,9 @@ const SettingsView: React.FC = () => {
                     newValue: profileData.email,
                     metadata: { version: APP_VERSION }
                 });
-                await updateEmail(auth.currentUser, profileData.email);
+                // Supabase sends a confirmation email to the new address before applying
+                const { error: emailErr } = await supabase.auth.updateUser({ email: profileData.email });
+                if (emailErr) throw emailErr;
             }
 
             await handleUpdateUser({ ...currentUser, ...profileData });
@@ -330,14 +334,18 @@ const SettingsView: React.FC = () => {
         setIsChangingPassword(true);
 
         try {
-            if (!auth.currentUser) throw new Error('No authenticated user found');
+            // Re-authenticate by verifying the current password via a fresh sign-in
+            const { data: { user: authUser } } = await supabase.auth.getUser();
+            if (!authUser?.email) throw new Error('No authenticated user found');
 
-            const credential = EmailAuthProvider.credential(
-                auth.currentUser.email!,
-                passwordData.currentPassword
-            );
-            await reauthenticateWithCredential(auth.currentUser, credential);
-            await updatePassword(auth.currentUser, passwordData.newPassword);
+            const { error: reauthErr } = await supabase.auth.signInWithPassword({
+                email: authUser.email,
+                password: passwordData.currentPassword,
+            });
+            if (reauthErr) { const e: any = new Error('Current password is incorrect'); e.code = 'auth/wrong-password'; throw e; }
+
+            const { error: pwErr } = await supabase.auth.updateUser({ password: passwordData.newPassword });
+            if (pwErr) throw pwErr;
 
             // Audit trail for password change (HIGH severity — security event)
             try {

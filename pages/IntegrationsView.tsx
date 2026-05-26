@@ -11,7 +11,7 @@ import GoogleSheetsImportModal from '../components/GoogleSheetsImportModal';
 import ExcelImportModal from '../components/ExcelImportModal';
 import { QRCodeCanvas } from 'qrcode.react';
 import { API_ENDPOINTS } from '../utils/apiConfig';
-import { auth } from '../services/firebase';
+import { getAccessToken } from '../services/supabase';
 
 const ZohoIcon: React.FC = () => (
     <svg className="w-12 h-12" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -136,7 +136,7 @@ const IntegrationsView: React.FC = () => {
         try {
             const organizationId = currentOrganization?.id || 'unknown';
             const userId = state.currentUser?.uid || 'unknown';
-            const token = await auth.currentUser?.getIdToken();
+            const token = await getAccessToken();
             const response = await fetch(API_ENDPOINTS.zohoAuthUrl(organizationId, userId), {
                 headers: token ? { Authorization: `Bearer ${token}` } : {},
             });
