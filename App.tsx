@@ -400,9 +400,9 @@ const AppContent: React.FC = () => {
     setOnboardingCompleted(true);
     localStorage.setItem('onboardingCompleted', 'true');
     if (firebaseUser) {
-      localStorage.setItem('onboardingUid', firebaseUser.uid);
+      localStorage.setItem('onboardingUid', firebaseUser.id);
       if (authData) {
-        await api.markOnboardingComplete(authData.organization.id, firebaseUser.uid);
+        await api.markOnboardingComplete(authData.organization.id, firebaseUser.id);
       }
     }
     // Clear any saved view and navigate to Dashboard for new users
@@ -431,7 +431,7 @@ const AppContent: React.FC = () => {
       setOnboardingCompleted(true);
       localStorage.setItem('onboardingCompleted', 'true');
       if (authData && firebaseUser) {
-        await api.markOnboardingComplete(authData.organization.id, firebaseUser.uid);
+        await api.markOnboardingComplete(authData.organization.id, firebaseUser.id);
       }
       addToast({ message: 'Successfully imported items from Zoho!', type: 'success' });
     } catch (err: any) {
@@ -445,8 +445,9 @@ const AppContent: React.FC = () => {
   const handleZohoConnectFromOnboarding = useCallback(async () => {
     if (!authData || !firebaseUser) return;
     try {
-      const token = await auth.currentUser?.getIdToken();
-      const response = await fetch(API_ENDPOINTS.zohoAuthUrl(authData.organization.id, firebaseUser.uid), {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      const response = await fetch(API_ENDPOINTS.zohoAuthUrl(authData.organization.id, firebaseUser.id), {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
       const data = await response.json();
@@ -464,7 +465,7 @@ const AppContent: React.FC = () => {
     setOnboardingCompleted(true);
     localStorage.setItem('onboardingCompleted', 'true');
     if (authData && firebaseUser) {
-      api.markOnboardingComplete(authData.organization.id, firebaseUser.uid);
+      api.markOnboardingComplete(authData.organization.id, firebaseUser.id);
     }
     // Store the intended view in localStorage so MainLayout can pick it up
     localStorage.setItem('pendingView', 'integrations');
@@ -475,7 +476,7 @@ const AppContent: React.FC = () => {
     setOnboardingCompleted(true);
     localStorage.setItem('onboardingCompleted', 'true');
     if (authData && firebaseUser) {
-      api.markOnboardingComplete(authData.organization.id, firebaseUser.uid);
+      api.markOnboardingComplete(authData.organization.id, firebaseUser.id);
     }
     // Store the intended view in localStorage so MainLayout can pick it up
     localStorage.setItem('pendingView', 'integrations');
@@ -486,7 +487,7 @@ const AppContent: React.FC = () => {
     setOnboardingCompleted(true);
     localStorage.setItem('onboardingCompleted', 'true');
     if (authData && firebaseUser) {
-      api.markOnboardingComplete(authData.organization.id, firebaseUser.uid);
+      api.markOnboardingComplete(authData.organization.id, firebaseUser.id);
     }
     localStorage.setItem('pendingView', 'integrations');
   }, [authData, firebaseUser]);

@@ -5,9 +5,8 @@ import * as api from '../services/apiService';
 import { activityLogger } from '../services/activityLogger';
 import { updateItemWithBackend, getBackendHealth } from '../services/enhancedAPI';
 import { sortByUsage } from '../utils/inventoryUtils';
-import { firestore } from '../services/firebase';
-import { doc, updateDoc, serverTimestamp, collection, query, orderBy, limit, onSnapshot, where } from 'firebase/firestore';
-import type { Unsubscribe } from 'firebase/firestore';
+import { supabase } from '../services/supabase';
+import type { RealtimeChannel } from '@supabase/supabase-js';
 import type { ApprovalRequest } from '../services/apiService';
 
 // Get actual username from userId by looking up in users
@@ -435,220 +434,158 @@ export const AppProvider: React.FC<{ children: ReactNode, user: User, organizati
     }, [state.settings, state.currentUser.email, addToast]);
 
     const setupRealtimeListeners = useCallback((orgId: string) => {
-        const unsubscribeFunctions: Unsubscribe[] = [];
+        const channels: RealtimeChannel[] = [];
 
         if (!orgId || orgId === 'undefined') {
             console.error('Invalid organization ID for real-time listeners:', orgId);
             return () => {};
         }
 
-        // 1. Real-time inventory updates
-        const inventoryPath = `organizations/${orgId}/inventory`;
-        const inventoryQuery = query(
-            collection(firestore, inventoryPath),
-            orderBy('updatedAt', 'desc')
-        );
-        
-        const unsubscribeInventory = onSnapshot(inventoryQuery, (snapshot) => {
-            const updatedInventory: InventoryItem[] = [];
-            snapshot.forEach((doc) => {
-                const data = doc.data();
-                updatedInventory.push({
-                    id: doc.id,
-                    ...data,
-                    lastUpdated: data.lastUpdated?.toDate?.() || new Date()
-                } as unknown as InventoryItem);
-            });
-            
-            dispatch({ type: 'SET_INVENTORY', payload: sortByUsage(updatedInventory) });
-            
-        }, (error) => {
-            console.error('Real-time inventory listener error:', error.message);
-        });
-        unsubscribeFunctions.push(unsubscribeInventory);
+        // Helper: re-fetch inventory and update state
+        const refreshInventory = async () => {
+            const { data } = await supabase
+                .from('inventory_items')
+                .select('*')
+                .eq('org_id', orgId)
+                .eq('is_active', true)
+                .order('updated_at', { ascending: false });
+            if (data) {
+                const mapped: InventoryItem[] = data.map((r: any) => ({
+                    id: r.id, organizationId: r.org_id, name: r.name, sku: r.sku,
+                    category: r.category || '', stock: r.quantity ?? 0, threshold: r.min_quantity ?? 10,
+                    price: r.unit_price, cost: r.cost_price, unit: r.unit,
+                    description: r.description, source: r.source || 'manual',
+                    isPriority: r.is_priority, location: r.location,
+                    lastUpdated: r.updated_at,
+                }));
+                dispatch({ type: 'SET_INVENTORY', payload: sortByUsage(mapped) });
+            }
+        };
 
-        // 2. Real-time activity logs updates
-        const logsQuery = query(
-            collection(firestore, `organizations/${orgId}/activityLogs`),
-            orderBy('timestamp', 'desc'),
-            limit(200)
-        );
-        const unsubscribeLogs = onSnapshot(logsQuery, (snapshot) => {
-            const updatedLogs: ActivityLogEntry[] = [];
-            snapshot.forEach(doc => {
-                const data = doc.data();
-                
-                // Get actual username by looking up in users - use current state users
-                const actualUsername = data.user || data.userName || getUserDisplayName(data.userId, state.users);
-                
-                // Transform APK logs to dashboard format for compatibility
-                const transformedLog = {
-                    id: doc.id,
-                    ...data,
-                    // Use actual display names like dashboard logs
-                    user: actualUsername,
-                    userName: actualUsername,
-                    organizationId: data.organizationId || data.orgId,
-                    timestamp: data.timestamp?.toDate?.()?.toISOString() || data.timestamp || new Date().toISOString(),
-                    // Preserve APK fields for detection
-                    source: data.source,
-                    itemId: data.itemId,
-                    itemName: data.itemName,
-                    quantity: data.quantity
-                } as unknown as ActivityLogEntry;
-                
-                updatedLogs.push(transformedLog);
-            });
-            
-            dispatch({ 
-                type: 'SET_ACTIVITY_LOGS', 
-                payload: updatedLogs
-            });
-        }, (error) => {
-            console.error('❌ Real-time activity logs listener error:', error);
-        });
-        unsubscribeFunctions.push(unsubscribeLogs);
+        // Helper: re-fetch activity logs
+        const refreshLogs = async () => {
+            const { data } = await supabase
+                .from('activity_logs')
+                .select('*')
+                .eq('org_id', orgId)
+                .order('created_at', { ascending: false })
+                .limit(200);
+            if (data) {
+                const mapped: ActivityLogEntry[] = data.map((r: any) => ({
+                    id: r.id, organizationId: r.org_id, type: r.type,
+                    user: getUserDisplayName(r.actor_id, state.users),
+                    userName: getUserDisplayName(r.actor_id, state.users),
+                    timestamp: r.created_at, details: r.details,
+                    entityType: r.entity_type, entityId: r.entity_id,
+                }));
+                dispatch({ type: 'SET_ACTIVITY_LOGS', payload: mapped });
+            }
+        };
 
-        // 3. Real-time users updates
-        const usersQuery = query(
-            collection(firestore, `organizations/${orgId}/users`),
-            orderBy('createdAt', 'desc')
-        );
-        const unsubscribeUsers = onSnapshot(usersQuery, (snapshot) => {
-            const updatedUsers: User[] = [];
-            snapshot.forEach(doc => {
-                const data = doc.data();
-                updatedUsers.push({
-                    uid: doc.id,
-                    ...data
-                } as User);
-            });
-            
-            console.log('👥 Real-time users update:', updatedUsers.length, 'users');
-            // Update only users in state
-            dispatch({ 
-                type: 'SET_USERS', 
-                payload: updatedUsers
-            });
-        }, (error) => {
-            console.error('❌ Real-time users listener error:', error);
-        });
-        unsubscribeFunctions.push(unsubscribeUsers);
+        // Helper: re-fetch users
+        const refreshUsers = async () => {
+            const { data } = await supabase
+                .from('users')
+                .select('*')
+                .eq('org_id', orgId)
+                .eq('is_active', true);
+            if (data) {
+                const mapped: User[] = data.map((r: any) => ({
+                    uid: r.id, name: r.full_name || r.email, email: r.email,
+                    role: r.role, organizationId: r.org_id,
+                }));
+                dispatch({ type: 'SET_USERS', payload: mapped });
+            }
+        };
 
-        // 4. Real-time organization updates (for categories, settings, etc.)
-        const orgDoc = doc(firestore, `organizations/${orgId}`);
-        const unsubscribeOrg = onSnapshot(orgDoc, (snapshot) => {
-            if (snapshot.exists()) {
-                const orgData = snapshot.data();
-                console.log('🏢 Real-time organization update');
-                dispatch({ 
-                    type: 'UPDATE_ORGANIZATION', 
-                    payload: {
-                        categories: orgData.categories || [],
-                        ...orgData
-                    }
-                });
-                
-                // Update categories in state
-                if (orgData.categories) {
-                    dispatch({ type: 'SET_CATEGORIES', payload: orgData.categories });
+        // Helper: re-fetch approvals
+        const refreshApprovals = async () => {
+            const { data } = await supabase
+                .from('approval_requests')
+                .select('*')
+                .eq('org_id', orgId)
+                .order('created_at', { ascending: false })
+                .limit(200);
+            if (data) {
+                window.dispatchEvent(new CustomEvent('approvalsUpdate', { detail: data }));
+            }
+        };
+
+        // Helper: re-fetch stock take sessions
+        const refreshStockTake = async () => {
+            const { data } = await supabase
+                .from('stock_take_sessions')
+                .select('*')
+                .eq('org_id', orgId)
+                .order('started_at', { ascending: false })
+                .limit(50);
+            if (data) {
+                const newActive = data.filter(
+                    (s: any) => s.status === 'open' && !seenStockTakeSessionIds.current.has(s.id)
+                );
+                data.forEach((s: any) => seenStockTakeSessionIds.current.add(s.id));
+                if (newActive.length > 0) {
+                    newActive.forEach(async (session: any) => {
+                        try {
+                            const notifService = (await import('../services/notificationService')).default;
+                            await notifService.createNotification(orgId, {
+                                type: 'stock_take_session' as any,
+                                title: 'Stock Take Started',
+                                message: `A stock take was started. Review in Stock Take Monitor.`,
+                                targetUserId: 'ALL', priority: 'high', link: '/stock-take-monitor',
+                                metadata: { sessionId: session.id, source: 'dashboard', eventType: 'STARTED' }
+                            } as any);
+                        } catch (e) { console.warn('⚠️ Failed to create stock take notification:', e); }
+                    });
                 }
+                window.dispatchEvent(new CustomEvent('stockTakeSessionsUpdate', { detail: data }));
             }
-        }, (error) => {
-            console.error('❌ Real-time organization listener error:', error);
-        });
-        unsubscribeFunctions.push(unsubscribeOrg);
+        };
 
-        // 5. Real-time stock take sessions (for approvals and monitoring)
-        const stockTakeQuery = query(
-            collection(firestore, `organizations/${orgId}/stockTakeSessions`),
-            orderBy('createdAt', 'desc'),
-            limit(50)
-        );
-        const unsubscribeStockTake = onSnapshot(stockTakeQuery, (snapshot) => {
-            const stockTakeSessions: any[] = [];
-            snapshot.forEach(doc => {
-                stockTakeSessions.push({
-                    id: doc.id,
-                    ...doc.data()
-                });
-            });
-            
-            // Detect newly-started APK sessions (status ACTIVE that we haven't seen before)
-            const newActiveSessions = stockTakeSessions.filter(
-                s => s.status === 'ACTIVE' && !seenStockTakeSessionIds.current.has(s.id)
-            );
-            // Mark all current sessions as seen
-            stockTakeSessions.forEach(s => seenStockTakeSessionIds.current.add(s.id));
+        // 1. Inventory channel
+        const invChannel = supabase.channel(`ctx-inventory:${orgId}`)
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'inventory_items', filter: `org_id=eq.${orgId}` },
+                () => { refreshInventory(); })
+            .subscribe();
+        channels.push(invChannel);
 
-            // Fire a notification for each new ACTIVE session (non-blocking)
-            if (newActiveSessions.length > 0) {
-                newActiveSessions.forEach(async (session) => {
-                    try {
-                        const notifService = (await import('../services/notificationService')).default;
-                        // Only ever show the human-readable device model name.
-                        // Never the raw hex device ID, and never repeat the username here.
-                        const deviceLabel = session.deviceName || 'a mobile device';
-                        await notifService.createNotification(orgId, {
-                            type: 'stock_take_session' as any,
-                            title: 'Stock Take Started',
-                            message: `${session.userName || 'A mobile user'} started a stock take on ${deviceLabel}. Review in Stock Take Monitor.`,
-                            targetUserId: 'ALL',
-                            priority: 'high',
-                            link: '/stock-take-monitor',
-                            metadata: {
-                                sessionId: session.id,
-                                deviceId: session.deviceId,
-                                deviceName: session.deviceName,
-                                userName: session.userName,
-                                startTime: session.startTime,
-                                source: 'apk',
-                                eventType: 'STARTED'
-                            }
-                        } as any);
-                        console.log('🔔 Notification created for new stock take session:', session.id);
-                    } catch (e) {
-                        console.warn('⚠️ Failed to create stock take notification:', e);
-                    }
-                });
-            }
+        // 2. Activity logs channel
+        const logsChannel = supabase.channel(`ctx-logs:${orgId}`)
+            .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'activity_logs', filter: `org_id=eq.${orgId}` },
+                () => { refreshLogs(); })
+            .subscribe();
+        channels.push(logsChannel);
 
-            console.log('📊 Real-time stock take sessions update:', stockTakeSessions.length, 'sessions');
-            // Store in global state or emit event for components that need it
-            window.dispatchEvent(new CustomEvent('stockTakeSessionsUpdate', { 
-                detail: stockTakeSessions 
-            }));
-        }, (error) => {
-            console.error('❌ Real-time stock take sessions listener error:', error);
-        });
-        unsubscribeFunctions.push(unsubscribeStockTake);
+        // 3. Users channel
+        const usersChannel = supabase.channel(`ctx-users:${orgId}`)
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'users', filter: `org_id=eq.${orgId}` },
+                () => { refreshUsers(); })
+            .subscribe();
+        channels.push(usersChannel);
 
-        // 6. Real-time approval updates (dashboard + APK parity)
-        const approvalsQuery = query(
-            collection(firestore, `organizations/${orgId}/approvals`),
-            orderBy('requestedAt', 'desc'),
-            limit(200)
-        );
-        const unsubscribeApprovals = onSnapshot(approvalsQuery, (snapshot) => {
-            const approvals: ApprovalRequest[] = [];
-            snapshot.forEach(docSnap => {
-                approvals.push({
-                    id: docSnap.id,
-                    ...docSnap.data()
-                } as ApprovalRequest);
-            });
-            console.log('📨 Real-time approvals update:', approvals.length);
-            window.dispatchEvent(new CustomEvent('approvalsUpdate', {
-                detail: approvals
-            }));
-        }, (error) => {
-            console.error('❌ Real-time approvals listener error:', error);
-        });
-        unsubscribeFunctions.push(unsubscribeApprovals);
+        // 4. Approvals channel
+        const approvalsChannel = supabase.channel(`ctx-approvals:${orgId}`)
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'approval_requests', filter: `org_id=eq.${orgId}` },
+                () => { refreshApprovals(); })
+            .subscribe();
+        channels.push(approvalsChannel);
 
-        // Store unsubscribe functions for cleanup
+        // 5. Stock take sessions channel
+        const stockTakeChannel = supabase.channel(`ctx-stocktake:${orgId}`)
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'stock_take_sessions', filter: `org_id=eq.${orgId}` },
+                () => { refreshStockTake(); })
+            .subscribe();
+        channels.push(stockTakeChannel);
+
+        // Initial fetch for all listeners
+        refreshInventory();
+        refreshLogs();
+        refreshUsers();
+        refreshApprovals();
+        refreshStockTake();
+
         return () => {
-            unsubscribeFunctions.forEach(unsubscribe => unsubscribe());
+            channels.forEach(ch => supabase.removeChannel(ch));
         };
     }, []);
 
@@ -1249,45 +1186,25 @@ export const AppProvider: React.FC<{ children: ReactNode, user: User, organizati
                 throw new Error('No organization selected');
             }
 
-            const orgRef = doc(firestore, 'organizations', state.currentOrganization.id);
+            const orgId = state.currentOrganization.id;
             let endDate: string;
 
             // Handle downgrade - cancel existing subscription if needed
             if (plan === 'Free' && state.currentOrganization.subscription?.plan !== 'Free') {
                 console.log('🔄 Canceling existing subscription for downgrade to Free plan');
-                
                 endDate = state.currentOrganization.subscription?.endDate || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
-                // Mark subscription as cancelled but keep it active until period end
-                const cancelledSubscription = {
-                    plan: 'Free',
-                    status: 'active', // Keep active until current period ends
-                    startDate: new Date().toISOString(),
-                    endDate,
-                    cancelledAt: new Date().toISOString(),
-                    previousPlan: state.currentOrganization.subscription?.plan || 'Unknown'
-                };
-                
-                await updateDoc(orgRef, {
-                    subscription: cancelledSubscription,
-                    updatedAt: serverTimestamp()
+                await supabase.from('organization_settings').upsert({
+                    org_id: orgId,
+                    updated_at: new Date().toISOString(),
                 });
             } else {
-                // Regular subscription update
-                endDate = plan === 'Free' 
+                endDate = plan === 'Free'
                     ? new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
                     : new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
-                
-                const updatedSubscription = {
-                    plan,
-                    status,
-                    startDate: new Date().toISOString(),
-                    endDate
-                };
-                
-                await updateDoc(orgRef, {
-                    subscription: updatedSubscription,
-                    updatedAt: serverTimestamp()
-                });
+                await supabase.from('organizations').update({
+                    plan: plan.toLowerCase(),
+                    updated_at: new Date().toISOString(),
+                }).eq('id', orgId);
             }
             
             dispatch({ 
