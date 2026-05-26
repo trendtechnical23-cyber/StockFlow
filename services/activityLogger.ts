@@ -1,6 +1,16 @@
-import { serverTimestamp } from 'firebase/firestore';
-import { auth } from './firebase';
+import { supabase } from './supabase';
 import { addLogAPI } from './apiService';
+
+/** Resolve the currently authenticated Supabase user (cached per call). */
+const getCurrentUser = async () => {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return null;
+  return {
+    uid: user.id,
+    email: user.email ?? '',
+    displayName: (user.user_metadata?.full_name as string) || user.email || 'Unknown User',
+  };
+};
 
 /**
  * Comprehensive activity logger for audit trail
@@ -28,7 +38,7 @@ class ActivityLogger {
    */
   async log(organizationId: string, data: ActivityLogData): Promise<void> {
     try {
-      const currentUser = auth.currentUser;
+      const currentUser = await getCurrentUser();
       if (!currentUser) {
         console.warn('⚠️ Cannot log activity - no current user');
         return;
@@ -172,8 +182,9 @@ class ActivityLogger {
   }
 
   async logInventoryAction(organizationId: string, action: string, itemName: string, details?: any) {
-    const description = `${action.replace(/_/g, ' ')}: ${itemName} by ${auth.currentUser?.email || 'System'}`;
-    
+    const actor = await getCurrentUser();
+    const description = `${action.replace(/_/g, ' ')}: ${itemName} by ${actor?.email || 'System'}`;
+
     await this.log(organizationId, {
       action: action.replace(/_/g, ' '),
       category: 'INVENTORY',
@@ -191,8 +202,8 @@ class ActivityLogger {
     // Trigger system notification for every edit/move/delete
     try {
       const { notificationService } = await import('./notificationService');
-      const currentUser = auth.currentUser;
-      
+      const currentUser = actor;
+
       await notificationService.createNotification(organizationId, {
         type: 'stock',
         title: action.replace(/_/g, ' '),
@@ -239,24 +250,11 @@ class ActivityLogger {
    */
   async createTestAPKLog(organizationId: string) {
     try {
-      const mockAPKLog = {
-        orgId: organizationId,
-        userId: 'test_apk_user_123',
+      await addLogAPI({
         action: 'Stock Out: Repair - Removed 1 units',
-        itemId: 'item_repair_001',
-        itemName: 'Repair Kit',
-        quantity: -1,
-        timestamp: new Date().toISOString(),
-        source: 'apk',
-        user: 'John Smith', // Real username from APK
-        userName: 'John Smith' // Real username from APK
-      };
-
-      // Use Firebase addDoc directly to simulate APK log
-      const { addDoc, collection } = await import('./firebase');
-      const logsRef = collection(firestore, 'organizations', organizationId, 'activityLogs');
-      
-      await addDoc(logsRef, mockAPKLog);
+        user: 'John Smith',
+        details: { itemId: 'item_repair_001', itemName: 'Repair Kit', quantity: -1, source: 'apk' },
+      } as any, organizationId);
       console.log('📱 Test APK log created successfully');
     } catch (error) {
       console.error('❌ Failed to create test APK log:', error);

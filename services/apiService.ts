@@ -20,6 +20,9 @@ const orgDataService = OrganizationDataService.getInstance();
 const firestore: any = null; // eslint-disable-line @typescript-eslint/no-unused-vars
 const auth: any = null;      // eslint-disable-line @typescript-eslint/no-unused-vars
 
+// Validates a string is a real UUID (used before writing FK columns like actor_id)
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 // Firestore SDK primitive stubs. Any not-yet-migrated function that calls these
 // throws a CATCHABLE error (handled by the function's own try/catch) instead of
 // a raw `ReferenceError: X is not defined` that would crash a React render.
@@ -759,25 +762,26 @@ export const removeUserFromOrganization = async (userId: string, organizationId:
  * Add activity log entry to organization
  */
 export const addLogAPI = async (logEntry: Omit<ActivityLogEntry, 'id' | 'timestamp' | 'organizationId'>, organizationId: string): Promise<void> => {
-  if (!firestore) {
-    console.warn('Firestore not initialized, skipping log entry');
-    return;
-  }
-
   try {
-    const logsRef = orgDataService.getOrgCollection(organizationId, 'activityLogs');
-    const userName = String(logEntry.user || 'System');
-    const docRef = await addDoc(logsRef, {
-      ...logEntry,
-      user: userName,
-      organizationId,
-      timestamp: serverTimestamp(),
-      createdAt: new Date().toISOString()
+    const e: any = logEntry;
+    const userName = String(e.user || 'System');
+    // actor_id is a FK to users(id); only set it when it's a real UUID, else null
+    const actorId = (e.userId && UUID_RE.test(e.userId)) ? e.userId : null;
+
+    const { error } = await supabase.from('activity_logs').insert({
+      org_id:      organizationId,
+      type:        e.action || e.category || 'SYSTEM',
+      entity_type: e.targetType || e.entityType || null,
+      entity_id:   e.targetId != null ? String(e.targetId) : (e.itemId != null ? String(e.itemId) : null),
+      actor_id:    actorId,
+      details:     { ...e, user: userName },
     });
-    try { broadcastActivity(organizationId, { id: docRef.id, organizationId, user: userName, action: logEntry.action, timestamp: new Date().toISOString(), type: 'SYSTEM', payload: logEntry.details || null }); } catch {}
+    if (error) throw error;
+
+    try { broadcastActivity(organizationId, { id: crypto.randomUUID(), organizationId, user: userName, action: e.action, timestamp: new Date().toISOString(), type: 'SYSTEM', payload: e.details || null }); } catch {}
   } catch (error) {
     console.error('❌ Error adding activity log:', error);
-    // Don't throw error for logs to prevent disrupting main functionality
+    // Don't throw — logging failures shouldn't disrupt main functionality
   }
 };
 
