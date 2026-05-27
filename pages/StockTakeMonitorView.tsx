@@ -1,12 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useAppContext } from '../context/AppContext';
 import { useToast } from '../hooks/useToast';
-import { centralizedStockTakeService, centralizedErrorService, firestoreService } from '../services';
+import { supabase } from '../services/supabase';
+import { activityLogger } from '../services/activityLogger';
 import { createApprovalRequest } from '../services/apiService';
-import { database } from '../services/firebase';
-import { ref, onValue, get, remove, update, off, push, child, set } from 'firebase/database';
 import { UserRole } from '../types';
-import stockTakeService from '../services/stockTakeService';
 import LiveScanPanel from '../components/LiveScanPanel';
 
 /**
@@ -127,281 +125,103 @@ const StockTakeMonitorView: React.FC = () => {
     
     window.addEventListener('stockTakeSessionsUpdate', handleStockTakeUpdate as EventListener);
 
-    // Store APK sessions in separate state to prevent RTDB overwrites
-    const loadAPKSessions = async () => {
+    // Load sessions from Supabase (replaces Firestore loadAPKSessions)
+    const loadSessions = async () => {
       try {
-        console.log('🔍 DEBUGGING: Loading APK sessions from Firestore...');
-        const sessions = await stockTakeService.getAllSessions(state.currentOrganization.id);
-        console.log('🔍 Found APK sessions:', sessions.length);
-        console.log('🔍 APK sessions data:', sessions);
-        
-        // Filter to only COMPLETED sessions (exclude APPROVED/REJECTED)
-        const pendingSessions = sessions.filter(s => 
-          s.status === 'COMPLETED' || s.status === 'ACTIVE'
-        );
-        
-        console.log('🔍 Filtered to pending sessions:', pendingSessions.length, '(excluded APPROVED/REJECTED)');
-        
-        // Convert APK sessions to pending approvals format with professional naming
-        const apkPendingApprovals = pendingSessions.map((session: any) => ({
-          id: session.id,
-          deviceId: session.deviceId,
-          deviceName: session.deviceName || undefined,
-          userName: session.userName,
-          userEmail: session.userName + '@domain.com', // Placeholder
-          startTime: session.startTime,
-          endTime: session.endTime || Date.now(),
-          status: 'PENDING_APPROVAL' as const,
-          itemsScanned: session.itemsScanned || 0,
-          scannedItems: session.scannedItems || [],
-          participantDevices: [],
-          source: 'mobile_app',
-          displayName: session.id // Use the already professional APK session ID
-        }));
-        
-        // Store APK sessions separately to prevent overwrites
-        setApkSessions(apkPendingApprovals);
-        apkSessionsRef.current = apkPendingApprovals; // Update ref for RTDB closure
-        
-        // Create professional activity logs for new APK sessions
-        if (apkPendingApprovals.length > 0) {
-          apkPendingApprovals.forEach((session) => {
-            // Only log sessions we haven't logged before
-            if (!loggedSessionIds.has(session.id)) {
-              // Create professional activity log entry
-              firestoreService.createActivityLog(state.currentOrganization.id, {
-                action: 'Stock Take Session Synced',
-                actionBy: session.userName || 'Mobile User',
-                actionByEmail: session.userEmail || 'mobile@stockflow.com',
-                description: `Mobile stock take session completed with ${session.itemsScanned} items scanned. Device: ${session.deviceName || session.userName || 'Mobile device'}. Status: Awaiting admin approval for inventory updates.`,
-                itemName: `Stock Take Session: ${session.displayName}`,
-                details: {
-                  sessionId: session.id,
-                  deviceId: session.deviceId,
-                  itemsScanned: session.itemsScanned,
-                  startTime: new Date(session.startTime).toISOString(),
-                  endTime: session.endTime ? new Date(session.endTime).toISOString() : 'In Progress',
-                  status: 'pending_approval',
-                  source: 'mobile_app',
-                  userName: session.userName,
-                  userEmail: session.userEmail,
-                  requiresApproval: true,
-                  sessionDetails: `Professional stock take session from mobile device containing inventory count data`
-                },
-                metadata: {
-                  sessionId: session.id,
-                  deviceId: session.deviceId,
-                  itemsScanned: session.itemsScanned,
-                  source: 'mobile_app',
-                  userName: session.userName,
-                  userEmail: session.userEmail,
-                  timestamp: session.startTime,
-                  status: 'pending_approval',
-                  auditLevel: 'high',
-                  requiresReview: true
-                }
-              }).then(() => {
-                console.log('✅ Created activity log for APK session:', session.displayName);
-              }).catch((error) => {
-                console.error('❌ Error creating activity log for APK session:', error);
-              });
-              
-              // Mark session as logged immediately
-              setLoggedSessionIds(prev => new Set(prev).add(session.id));
-            }
-          });
+        const { data, error } = await supabase
+          .from('stock_take_sessions')
+          .select(`
+            *,
+            stock_take_entries (
+              id, item_id, sku, counted_quantity, expected_quantity, scanned_at,
+              inventory_items ( name, sku, category )
+            ),
+            users!started_by ( full_name, email )
+          `)
+          .eq('org_id', state.currentOrganization.id)
+          .in('status', ['open', 'closed'])
+          .order('started_at', { ascending: false })
+          .limit(50);
+
+        if (error) {
+          console.error('❌ Error getting stock take sessions:', error);
+          return;
         }
-        
-        sessions.forEach(session => {
-          console.log(`📱 Session ${session.id}: ${session.status} - ${session.itemsScanned} items - User: ${session.userName}`);
+
+        const sessions: StockTakeSession[] = (data ?? []).map((row: any) => {
+          // Build scannedItems dict from entries
+          const scannedItems: { [key: string]: any } = {};
+          (row.stock_take_entries ?? []).forEach((entry: any) => {
+            const key = entry.item_id || entry.id;
+            const itemInfo = entry.inventory_items;
+            scannedItems[key] = {
+              itemId: entry.item_id,
+              itemName: itemInfo?.name || entry.sku || 'Unknown Item',
+              sku: entry.sku || itemInfo?.sku || '',
+              category: itemInfo?.category || '',
+              scannedQuantity: entry.counted_quantity,
+              expectedQuantity: entry.expected_quantity ?? 0,
+              variance: entry.counted_quantity - (entry.expected_quantity ?? 0),
+              scannedAt: entry.scanned_at ? new Date(entry.scanned_at).getTime() : null,
+            };
+          });
+
+          const startMs = row.started_at ? new Date(row.started_at).getTime() : Date.now();
+          const endMs = row.closed_at ? new Date(row.closed_at).getTime() : undefined;
+          const userName = row.users?.full_name || row.users?.email || row.name || 'Mobile User';
+          const itemCount = Object.keys(scannedItems).length;
+
+          return {
+            id: row.id,
+            deviceId: row.name || row.id,
+            deviceName: row.name || undefined,
+            userName,
+            userEmail: row.users?.email || '',
+            startTime: startMs,
+            endTime: endMs,
+            status: (row.status === 'open' ? 'ACTIVE' : 'PENDING_APPROVAL') as StockTakeSession['status'],
+            itemsScanned: itemCount,
+            scannedItems,
+            participantDevices: [],
+            source: 'mobile_app' as const,
+            displayName: row.name || row.id.slice(-8),
+          };
         });
+
+        setApkSessions(sessions);
+        apkSessionsRef.current = sessions;
+        setActiveSessions(sessions.filter(s => s.status === 'ACTIVE'));
+        setPendingApprovals(sessions.filter(s => s.status === 'PENDING_APPROVAL'));
+
+        console.log(`📋 Loaded ${sessions.length} stock take session(s) from Supabase`);
       } catch (err) {
-        console.error('❌ Error getting APK sessions:', err);
+        console.error('❌ Error getting stock take sessions:', err);
       }
     };
 
-    loadAPKSessions();
+    loadSessions();
 
-    let unsubscribeDevices: (() => void) | null = null;
-    let unsubscribeApprovals: (() => void) | null = null;
-
-    const setupSubscriptions = async () => {
-      try {
-        // Subscribe to device monitoring using centralized service
-        unsubscribeDevices = centralizedStockTakeService.subscribeToDeviceMonitoring(
-          state.currentOrganization.id,
-          async (devices) => {
-            const liveSessions: StockTakeSession[] = [];
-            const now = Date.now();
-
-            // Get completed sessions for cross-reference
-            const completedSessions = await centralizedStockTakeService.getAllSessions(
-              state.currentOrganization.id,
-              'COMPLETED',
-              20
-            );
-            const completedSessionIds = new Set(completedSessions.map(s => s.id));
-
-            Object.keys(devices).forEach((deviceId) => {
-              const deviceData = devices[deviceId];
-              const sessionId = deviceData.sessionId || deviceId;
-              
-              // Skip if already completed
-              if (completedSessionIds.has(sessionId)) {
-                return;
-              }
-              
-              const itemsScanned = deviceData.totalItems || 
-                                 deviceData.itemsScanned || 
-                                 deviceData.scannedCount || 
-                                 (deviceData.items ? deviceData.items.length : 0) || 
-                                 0;
-
-              const isEnded = deviceData.endedAt || deviceData.status === 'ENDED';
-              const isCompleted = deviceData.status === 'COMPLETED';
-              
-              if (isEnded || isCompleted) {
-                liveSessions.push({
-                  id: sessionId,
-                  deviceId: deviceData.deviceId || deviceId,
-                  userName: deviceData.deviceName || deviceData.userEmail || 'Unknown',
-                  userEmail: deviceData.userEmail || '',
-                  startTime: deviceData.startedAt || Date.now(),
-                  endTime: deviceData.endedAt,
-                  status: 'PENDING_SYNC',
-                  itemsScanned: itemsScanned,
-                  scannedItems: {},
-                  participantDevices: []
-                });
-                return;
-              }
-              
-              // Check for inactive sessions
-              const sessionAge = now - (deviceData.startedAt || 0);
-              const lastActivity = deviceData.lastActivity || deviceData.lastUpdate || deviceData.updatedAt || deviceData.startedAt || 0;
-              const timeSinceActivity = now - lastActivity;
-              
-              const maxInactivity = 30 * 1000; // 30 seconds
-              const maxAge = 10 * 60 * 1000; // 10 minutes
-              
-              if (timeSinceActivity > maxInactivity && !isEnded && !isCompleted) {
-                if (timeSinceActivity > 5 * 60 * 1000) {
-                  console.log('🗑️ Session inactive for >5min, likely deleted:', sessionId);
-                  return;
-                }
-                
-                liveSessions.push({
-                  id: sessionId,
-                  deviceId: deviceData.deviceId || deviceId,
-                  userName: deviceData.deviceName || deviceData.userEmail || 'Unknown',
-                  userEmail: deviceData.userEmail || '',
-                  startTime: deviceData.startedAt || Date.now(),
-                  endTime: lastActivity,
-                  status: 'PENDING_SYNC',
-                  itemsScanned: itemsScanned,
-                  scannedItems: {},
-                  participantDevices: []
-                });
-                return;
-              }
-              
-              if (sessionAge > maxAge) {
-                console.log('🧹 Session too old:', sessionId);
-                return;
-              }
-        
-        // Show truly active sessions
-              liveSessions.push({
-                id: sessionId,
-                deviceId: deviceData.deviceId || deviceId,
-                userName: deviceData.deviceName || deviceData.userEmail || 'Unknown',
-                userEmail: deviceData.userEmail || '',
-                startTime: deviceData.startedAt || Date.now(),
-                status: 'ACTIVE',
-                itemsScanned: itemsScanned,
-                scannedItems: {},
-                participantDevices: []
-              });
-            });
-
-            // Sort by newest first and update state
-            liveSessions.sort((a, b) => b.startTime - a.startTime);
-            setActiveSessions(liveSessions);
-          }
-        );
-
-        // Subscribe to approval requests using centralized service
-        unsubscribeApprovals = centralizedStockTakeService.subscribeToApprovals(
-          state.currentOrganization.id,
-          (approvals) => {
-            const pendingSessions: StockTakeSession[] = [];
-            
-            Object.keys(approvals).forEach((firebaseKey) => {
-              const sessionData = approvals[firebaseKey];
-              
-              // Only show PENDING sessions
-              if (sessionData.status === 'PENDING') {
-                const scannedItems: { [key: string]: any } = {};
-                let itemCount = 0;
-                
-                if (sessionData.items && Array.isArray(sessionData.items)) {
-                  itemCount = sessionData.items.length;
-                  sessionData.items.forEach((item: any) => {
-                    scannedItems[item.itemId || item.id] = item;
-                  });
-                }
-
-                pendingSessions.push({
-                  id: sessionData.sessionId || firebaseKey,
-                  deviceId: sessionData.deviceId || 'unknown',
-                  deviceName: sessionData.deviceName || undefined,
-                  userName: sessionData.userName || sessionData.userEmail?.split('@')[0] || 'Mobile User',
-                  userEmail: sessionData.userEmail || '',
-                  startTime: sessionData.startedAt || sessionData.timestamp || Date.now(),
-                  endTime: sessionData.endedAt,
-                  status: 'COMPLETED' as const,
-                  itemsScanned: itemCount,
-                  scannedItems: scannedItems,
-                  participantDevices: [],
-                  firebaseKey: firebaseKey
-                });
-              }
-            });
-
-            // Combine RTDB pending sessions with APK sessions
-            setPendingApprovals(prev => {
-              // Get current APK sessions from ref (not closure)
-              const currentApkSessions = apkSessionsRef.current;
-              const rtdbSessions = pendingSessions.map(s => ({ ...s, source: 'rtdb' as const }));
-              const combinedSessions = [...currentApkSessions, ...rtdbSessions];
-              console.log('🔄 RTDB Update - APK:', currentApkSessions.length, 'RTDB:', rtdbSessions.length, 'Total:', combinedSessions.length);
-              return combinedSessions;
-            });
-          }
-        );
-
-      } catch (error) {
-        console.error('❌ Error setting up stock take monitoring:', error);
-        centralizedErrorService.handleError(error as Error, {
-          severity: 'medium',
-          context: {
-            action: 'setup_stock_take_monitoring',
-            organizationId: state.currentOrganization.id,
-            component: 'StockTakeMonitorView'
-          }
-        });
-      }
-    };
-
-    setupSubscriptions();
+    // Real-time subscription via Supabase Realtime (replaces RTDB subscriptions)
+    const channel = supabase
+      .channel(`stock-take-monitor:${state.currentOrganization.id}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'stock_take_sessions', filter: `org_id=eq.${state.currentOrganization.id}` },
+        () => { loadSessions(); }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'stock_take_entries', filter: `org_id=eq.${state.currentOrganization.id}` },
+        () => { loadSessions(); }
+      )
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          console.log('🔔 Stock take monitor channel active');
+        }
+      });
 
     return () => {
-      if (unsubscribeDevices) {
-        unsubscribeDevices();
-      }
-      if (unsubscribeApprovals) {
-        unsubscribeApprovals();
-      }
+      supabase.removeChannel(channel);
       // Clean up real-time listener
       window.removeEventListener('stockTakeSessionsUpdate', handleStockTakeUpdate as EventListener);
     };
@@ -684,144 +504,88 @@ const StockTakeMonitorView: React.FC = () => {
     }
 
     try {
-      if (session.source === 'mobile_app') {
-        // APK Session - mark approved in Firestore, then create per-item approval requests
-        await stockTakeService.approveSession(state.currentOrganization.id, sessionId);
+      // Mark session as approved in Supabase
+      const { error: updateError } = await supabase
+        .from('stock_take_sessions')
+        .update({
+          status: 'approved',
+          approved_by: state.currentUser?.uid ?? null,
+          approved_at: new Date().toISOString(),
+        })
+        .eq('id', sessionId);
 
-        // Collect scanned items (handle both array and object representations)
-        const rawItems = session.scannedItems;
-        const itemsArray: any[] = rawItems
-          ? Array.isArray(rawItems)
-            ? rawItems
-            : Object.values(rawItems)
-          : [];
+      if (updateError) throw updateError;
 
-        // Create approval requests only for items with discrepancy (variance !== 0)
-        const itemsWithVariance = itemsArray.filter(
-          (item: any) => item.variance !== 0 || (item.scannedQuantity !== item.expectedQuantity)
-        );
+      // Collect scanned items (handle both array and object representations)
+      const rawItems = session.scannedItems;
+      const itemsArray: any[] = rawItems
+        ? Array.isArray(rawItems)
+          ? rawItems
+          : Object.values(rawItems)
+        : [];
 
-        let approvalCount = 0;
-        if (itemsWithVariance.length > 0) {
-          await Promise.all(
-            itemsWithVariance.map(async (item: any) => {
-              const variance = item.variance ?? (item.scannedQuantity - (item.expectedQuantity ?? 0));
-              await createApprovalRequest(state.currentOrganization.id, {
-                type: 'zoho_sync' as any,
-                action: 'adjust_stock' as any,
-                itemId: item.itemId,
-                itemName: item.itemName || item.name || 'Unknown Item',
-                itemSKU: item.sku || '',
-                requestedBy: session.userEmail || state.currentUser?.uid || '',
-                requestedByName: session.userName || 'Mobile User',
-                requestedChange: {
-                  quantityDelta: variance,
-                  newQuantity: item.scannedQuantity,
-                  reason: `Stock take session ${sessionId} — scanned ${item.scannedQuantity}, expected ${item.expectedQuantity ?? 0}`,
-                },
-                stockTakeSessionId: sessionId,
-                stockTakeSessionTimestamp: new Date(session.startTime).toISOString(),
-                source: 'stock_take' as any,
-              });
-              approvalCount++;
-            })
-          );
-        }
+      // Create approval requests only for items with discrepancy (variance !== 0)
+      const itemsWithVariance = itemsArray.filter(
+        (item: any) => item.variance !== 0 || (item.scannedQuantity !== item.expectedQuantity)
+      );
 
-        // Create activity log for approval
-        await firestoreService.createActivityLog(state.currentOrganization.id, {
-          action: 'Stock Take Approved',
-          actionBy: state.currentUser?.email?.split('@')[0] || 'Admin',
-          actionByEmail: state.currentUser.email || '',
-          description: `Admin approved stock take session by ${session.userName} containing ${session.itemsScanned} scanned items. ${approvalCount} item adjustment${approvalCount !== 1 ? 's' : ''} sent for approval.`,
-          itemName: `Session: ${session.displayName || session.id}`,
-          metadata: {
-            sessionId: session.id,
-            originalUser: session.userName,
-            deviceId: session.deviceId,
-            itemsScanned: session.itemsScanned,
-            approvalRequestsCreated: approvalCount,
-            source: 'mobile_app',
-            approvedBy: state.currentUser?.email?.split('@')[0] || 'Admin',
-            approvedAt: Date.now()
-          }
-        });
-        
-        // Remove from pending approvals immediately
-        setPendingApprovals(prev => prev.filter(s => s.id !== sessionId));
-        setApkSessions(prev => prev.filter(s => s.id !== sessionId));
-        apkSessionsRef.current = apkSessionsRef.current.filter(s => s.id !== sessionId);
-        
-        if (approvalCount > 0) {
-          addToast({ 
-            message: `Stock take approved! ${approvalCount} item adjustment${approvalCount !== 1 ? 's' : ''} created — pending admin approval.`, 
-            type: 'success' 
-          });
-        } else {
-          addToast({ message: 'Stock take approved — no quantity discrepancies found.', type: 'success' });
-        }
-        setShowDetailsModal(false);
-      } else {
-        // RTDB Session - existing logic
-        const approvalsRef = ref(database, 'stockTakeApprovals');
-        const snapshot = await get(approvalsRef);
-        
-        if (snapshot.exists()) {
-          const approvals = snapshot.val();
-          let sessionKey = null;
-          let sessionData = null;
-          
-          for (const [key, data] of Object.entries(approvals as Record<string, any>)) {
-            if (data.sessionId === sessionId) {
-              sessionKey = key;
-              sessionData = data;
-              break;
-            }
-          }
-          
-          if (sessionKey && sessionData) {
-            await update(ref(database, `stockTakeApprovals/${sessionKey}`), {
-              status: 'APPROVED',
-              approvedAt: Date.now(),
-              approvedBy: state.currentUser.email
+      let approvalCount = 0;
+      if (itemsWithVariance.length > 0) {
+        await Promise.all(
+          itemsWithVariance.map(async (item: any) => {
+            const variance = item.variance ?? (item.scannedQuantity - (item.expectedQuantity ?? 0));
+            await createApprovalRequest(state.currentOrganization.id, {
+              type: 'zoho_sync' as any,
+              action: 'adjust_stock' as any,
+              itemId: item.itemId,
+              itemName: item.itemName || item.name || 'Unknown Item',
+              itemSKU: item.sku || '',
+              requestedBy: session.userEmail || state.currentUser?.uid || '',
+              requestedByName: session.userName || 'Mobile User',
+              requestedChange: {
+                quantityDelta: variance,
+                newQuantity: item.scannedQuantity,
+                reason: `Stock take session ${sessionId} — scanned ${item.scannedQuantity}, expected ${item.expectedQuantity ?? 0}`,
+              },
+              stockTakeSessionId: sessionId,
+              stockTakeSessionTimestamp: new Date(session.startTime).toISOString(),
+              source: 'stock_take' as any,
             });
-
-            if (state.currentOrganization?.id) {
-              const approvalData = {
-                type: 'zoho_sync' as const,
-                action: 'adjust_stock' as const,
-                itemName: `Stock Take Session ${sessionData.deviceName}`,
-                itemSKU: sessionData.sessionId,
-                requestedBy: sessionData.userEmail,
-                requestedByName: sessionData.userEmail.split('@')[0],
-                requestedChange: {
-                  reason: `Stock Take completed on ${sessionData.deviceName} - ${sessionData.items?.length || 0} items scanned`,
-                  updatedFields: {
-                    stockTakeData: {
-                      sessionId: sessionData.sessionId,
-                      deviceName: sessionData.deviceName,
-                      startedAt: sessionData.startedAt,
-                      endedAt: sessionData.endedAt,
-                      items: sessionData.items || []
-                    }
-                  }
-                },
-                stockTakeSessionId: sessionData.sessionId,
-                stockTakeSessionTimestamp: new Date(sessionData.startedAt).toISOString(),
-                stockTakeItemCount: sessionData.items?.length || 0,
-                source: 'dashboard' as const
-              };
-              
-              await createApprovalRequest(state.currentOrganization.id, approvalData);
-            }
-            
-            addToast({ message: 'Stock take approved and sent to Approvals page!', type: 'success' });
-            setShowDetailsModal(false);
-          } else {
-            addToast({ message: 'RTDB session not found in approvals', type: 'error' });
-          }
-        }
+            approvalCount++;
+          })
+        );
       }
+
+      // Activity log via Supabase
+      await activityLogger.log(state.currentOrganization.id, {
+        action: 'Stock Take Approved',
+        category: 'INVENTORY',
+        description: `Admin approved stock take session by ${session.userName} containing ${session.itemsScanned} scanned items. ${approvalCount} item adjustment${approvalCount !== 1 ? 's' : ''} sent for approval.`,
+        targetType: 'item',
+        targetName: session.displayName || session.id,
+        metadata: {
+          sessionId: session.id,
+          originalUser: session.userName,
+          deviceId: session.deviceId,
+          itemsScanned: session.itemsScanned,
+          approvalRequestsCreated: approvalCount,
+        },
+      });
+
+      // Remove from UI immediately (Realtime will also refresh)
+      setPendingApprovals(prev => prev.filter(s => s.id !== sessionId));
+      setApkSessions(prev => prev.filter(s => s.id !== sessionId));
+      apkSessionsRef.current = apkSessionsRef.current.filter(s => s.id !== sessionId);
+
+      if (approvalCount > 0) {
+        addToast({
+          message: `Stock take approved! ${approvalCount} item adjustment${approvalCount !== 1 ? 's' : ''} created — pending admin approval.`,
+          type: 'success'
+        });
+      } else {
+        addToast({ message: 'Stock take approved — no quantity discrepancies found.', type: 'success' });
+      }
+      setShowDetailsModal(false);
     } catch (error) {
       console.error('Error approving session:', error);
       addToast({ message: 'Failed to approve session', type: 'error' });
@@ -839,62 +603,35 @@ const StockTakeMonitorView: React.FC = () => {
     }
 
     try {
-      if (session.source === 'mobile_app') {
-        // APK Session - update in Firestore and remove from view
-        await stockTakeService.rejectSession(state.currentOrganization.id, sessionId);
-        
-        // Create activity log for rejection
-        await firestoreService.createActivityLog(state.currentOrganization.id, {
-          action: 'Stock Take Rejected',
-          actionBy: state.currentUser?.email?.split('@')[0] || 'Admin',
-          actionByEmail: state.currentUser.email || '',
-          description: `Admin rejected stock take session by ${session.userName} containing ${session.itemsScanned} scanned items`,
-          itemName: `Session: ${session.displayName || session.id}`,
-          metadata: {
-            sessionId: session.id,
-            originalUser: session.userName,
-            deviceId: session.deviceId,
-            itemsScanned: session.itemsScanned,
-            source: 'mobile_app',
-            rejectedBy: state.currentUser?.email?.split('@')[0] || 'Admin',
-            rejectedAt: Date.now()
-          }
-        });
-        
-        // Remove from pending approvals immediately
-        setPendingApprovals(prev => prev.filter(s => s.id !== sessionId));
-        setApkSessions(prev => prev.filter(s => s.id !== sessionId));
-        apkSessionsRef.current = apkSessionsRef.current.filter(s => s.id !== sessionId);
-        
-        addToast({ message: 'APK stock take rejected', type: 'info' });
-      } else {
-        // RTDB Session - existing logic
-        const approvalsRef = ref(database, 'stockTakeApprovals');
-        const snapshot = await get(approvalsRef);
-        
-        if (snapshot.exists()) {
-          const approvals = snapshot.val();
-          let sessionKey = null;
-          
-          for (const [key, data] of Object.entries(approvals as Record<string, any>)) {
-            if (data.sessionId === sessionId) {
-              sessionKey = key;
-              break;
-            }
-          }
-          
-          if (sessionKey) {
-            await update(ref(database, `stockTakeApprovals/${sessionKey}`), {
-              status: 'REJECTED',
-              rejectedAt: Date.now()
-            });
-            
-            addToast({ message: 'Stock take session rejected', type: 'info' });
-          } else {
-            addToast({ message: 'RTDB session not found in approvals', type: 'error' });
-          }
-        }
-      }
+      // Mark session as rejected in Supabase
+      const { error: updateError } = await supabase
+        .from('stock_take_sessions')
+        .update({ status: 'rejected' })
+        .eq('id', sessionId);
+
+      if (updateError) throw updateError;
+
+      // Activity log via Supabase
+      await activityLogger.log(state.currentOrganization.id, {
+        action: 'Stock Take Rejected',
+        category: 'INVENTORY',
+        description: `Admin rejected stock take session by ${session.userName} containing ${session.itemsScanned} scanned items`,
+        targetType: 'item',
+        targetName: session.displayName || session.id,
+        metadata: {
+          sessionId: session.id,
+          originalUser: session.userName,
+          deviceId: session.deviceId,
+          itemsScanned: session.itemsScanned,
+        },
+      });
+
+      // Remove from UI immediately
+      setPendingApprovals(prev => prev.filter(s => s.id !== sessionId));
+      setApkSessions(prev => prev.filter(s => s.id !== sessionId));
+      apkSessionsRef.current = apkSessionsRef.current.filter(s => s.id !== sessionId);
+
+      addToast({ message: 'Stock take session rejected', type: 'info' });
     } catch (error) {
       console.error('Error rejecting session:', error);
       addToast({ message: 'Failed to reject session', type: 'error' });
