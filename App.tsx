@@ -195,196 +195,146 @@ const AppContent: React.FC = () => {
     // Guard against unconfigured Firebase
     console.log('🔐 Setting up Supabase auth state listener');
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
       const user = session?.user ?? null;
       try {
         // Mounted guard to avoid state updates after unmount
-        if (!mountedRef.current) {
-          console.log('⚠️ Component unmounted, skipping auth state update');
-          return;
+        if (!mountedRef.current) return;
+
+        console.log('🔐 Auth event:', event, '| User:', user ? user.email : 'null');
+
+        // ── TOKEN_REFRESHED fires every time the tab regains focus (Supabase
+        //    refreshes the JWT proactively). It is NOT a sign-in — just update
+        //    the user ref silently so the rest of the app stays in sync.
+        if (event === 'TOKEN_REFRESHED') {
+          setFirebaseUser(user);
+          return; // do NOT show loading, do NOT re-fetch profile
         }
-        
-        console.log('🔐 Auth state changed. User:', user ? `${user.email} (${user.id})` : 'null');
-        setIsLoading(true);
+
         if (user) {
-        // Reset onboarding flag when switching accounts or for new users
-        const storedOnboardingUid = localStorage.getItem('onboardingUid');
-        console.log('🔍 UID check:', { storedUid: storedOnboardingUid, currentUid: user.id, isNewUser: storedOnboardingUid !== user.id });
-        if (storedOnboardingUid !== user.id) {
-          console.log('🔄 New user or different user detected, clearing onboarding state');
-          localStorage.setItem('onboardingUid', user.id);
-          localStorage.removeItem('onboardingCompleted');
-          localStorage.removeItem('currentView'); // Clear stored view to start fresh
-          localStorage.removeItem('pendingView'); // Clear any pending view redirects
-          setOnboardingCompleted(false);
-        }
+          // Reset onboarding flag only when a *different* user logs in
+          const storedOnboardingUid = localStorage.getItem('onboardingUid');
+          if (storedOnboardingUid !== user.id) {
+            console.log('🔄 Different user detected, clearing onboarding state');
+            localStorage.setItem('onboardingUid', user.id);
+            localStorage.removeItem('onboardingCompleted');
+            localStorage.removeItem('currentView');
+            localStorage.removeItem('pendingView');
+            setOnboardingCompleted(false);
+          }
 
-        // Prevent multiple simultaneous getUserData calls
-        if (isLoadingUserDataRef.current) {
-          console.log('⏭️ Skipping getUserData call - already in progress');
-          setIsLoading(false);
-          return;
-        }
-        
-        setLoadingMessage('Loading your account...');
-        setFirebaseUser(user);
-        isLoadingUserDataRef.current = true;
-        try {
-          console.log('👤 Fetching user data for:', user.email);
-          console.log('🔍 Pre-fetch onboarding state:', { onboardingCompleted });
-          setLoadingMessage('Checking user profile...');
-          const result = await api.getUserData(user.id);
-          
-          if (result) {
-            console.log('✅ User data loaded successfully:', result.user.name, 'from org:', result.organization.name);
-            setLoadingMessage('Setting up dashboard...');
+          // Prevent multiple simultaneous getUserData calls
+          if (isLoadingUserDataRef.current) {
+            console.log('⏭️ Skipping getUserData — already in progress');
+            return;
+          }
 
-            // Persist onboarding flag from server to local state/storage
-            const completed = result.user.onboardingCompleted === true;
-            if (completed) {
-              setOnboardingCompleted(true);
-              localStorage.setItem('onboardingCompleted', 'true');
-              localStorage.setItem('onboardingUid', user.id);
-            }
-            
-            // Store organization ID for FCM token storage
-            localStorage.setItem('organizationId', result.organization.id);
-            
-            setAuthData({ user: result.user, organization: result.organization });
-            
-            console.log('✅ Organization setup complete:', result.organization.id);
-            
-            // Initialize FCM messaging for push notifications (silent - won't spam logs)
-            initializeMessaging()
-              .then(() => requestFCMPermission())
-              .catch(() => {
-                // FCM initialization is optional - app works without it
-                console.log('ℹ️ Push notifications unavailable (requires HTTPS in production)');
-              });
-            
-            // Notifications are now handled automatically by useNotifications hook
-            console.log('🔔 Notification system initialized (Firestore-only)');
-            
-            // Check if user needs onboarding (empty inventory and no integrations) - but only if not manually completed
-            // Don't show onboarding if they just connected to Zoho (integrations status changed)
-            const hasZohoConnected = result.organization.integrations?.zoho?.status === 'connected';
-            console.log('🔍 Onboarding check:', {
-                onboardingCompletedState: onboardingCompleted,
-                serverOnboardingCompleted: completed,
-                inventoryCount: result.inventoryCount,
-                hasZohoConnected,
-                shouldShowOnboarding: !onboardingCompleted && !completed && result.inventoryCount === 0 && !hasZohoConnected
-            });
-            
-            if (!onboardingCompleted && !completed && result.inventoryCount === 0 && !hasZohoConnected) {
-                console.log('🎆 New organization detected, showing onboarding');
-                setNeedsOnboarding(true);
-            } else {
-                console.log('🏢 Existing organization with data, integrations, or onboarding completed, skipping onboarding');
-                setNeedsOnboarding(false);
-            }
-            
-            // Start idle timer for authenticated users
-            startIdleTimer();
-          } else {
-            console.log('⚠️ No user profile found on first attempt — checking if this is a new signup');
+          setIsLoading(true);
+          setLoadingMessage('Loading your account...');
+          setFirebaseUser(user);
+          isLoadingUserDataRef.current = true;
+          try {
+            setLoadingMessage('Checking user profile...');
+            const result = await api.getUserData(user.id);
 
-            // New users: Firestore write may not have propagated yet when onAuthStateChanged fires.
-            // LoginPage sets 'signup_in_progress' before createUserWithEmailAndPassword so we know to retry.
-            const signupTs = localStorage.getItem('signup_in_progress');
-            const isNewUser = signupTs !== null && (Date.now() - parseInt(signupTs, 10)) < 60000;
+            if (result) {
+              console.log('✅ User data loaded:', result.user.name, '/', result.organization.name);
+              setLoadingMessage('Setting up dashboard...');
 
-            if (isNewUser) {
-              console.log('🆕 New user detected — retrying getUserData up to 5 times with backoff');
-              setLoadingMessage('Completing account setup...');
-              let retryResult = null;
-              for (let attempt = 1; attempt <= 5; attempt++) {
-                await new Promise(r => setTimeout(r, attempt * 1000));
-                console.log(`🔄 Retry attempt ${attempt}/5`);
-                retryResult = await api.getUserData(user.id);
-                if (retryResult) break;
+              const completed = result.user.onboardingCompleted === true;
+              if (completed) {
+                setOnboardingCompleted(true);
+                localStorage.setItem('onboardingCompleted', 'true');
+                localStorage.setItem('onboardingUid', user.id);
               }
 
-              localStorage.removeItem('signup_in_progress');
-              if (retryResult) {
-                const completed = retryResult.user.onboardingCompleted === true;
-                if (completed) {
-                  setOnboardingCompleted(true);
-                  localStorage.setItem('onboardingCompleted', 'true');
-                  localStorage.setItem('onboardingUid', user.id);
+              localStorage.setItem('organizationId', result.organization.id);
+              setAuthData({ user: result.user, organization: result.organization });
+
+              // Initialize FCM messaging (optional — silent fail)
+              initializeMessaging()
+                .then(() => requestFCMPermission())
+                .catch(() => {
+                  console.log('ℹ️ Push notifications unavailable');
+                });
+
+              const hasZohoConnected = result.organization.integrations?.zoho?.status === 'connected';
+              if (!onboardingCompleted && !completed && result.inventoryCount === 0 && !hasZohoConnected) {
+                setNeedsOnboarding(true);
+              } else {
+                setNeedsOnboarding(false);
+              }
+
+              startIdleTimer();
+            } else {
+              // No profile returned — only force sign-out for a brand-new signup
+              const signupTs = localStorage.getItem('signup_in_progress');
+              const isNewSignup = signupTs !== null && (Date.now() - parseInt(signupTs, 10)) < 60000;
+
+              if (isNewSignup) {
+                console.log('🆕 New signup — retrying getUserData up to 5×');
+                setLoadingMessage('Completing account setup...');
+                let retryResult = null;
+                for (let attempt = 1; attempt <= 5; attempt++) {
+                  await new Promise(r => setTimeout(r, attempt * 1000));
+                  retryResult = await api.getUserData(user.id);
+                  if (retryResult) break;
                 }
-                localStorage.setItem('organizationId', retryResult.organization.id);
-                setAuthData({ user: retryResult.user, organization: retryResult.organization });
-                startIdleTimer();
-                const hasZohoConnected = retryResult.organization.integrations?.zoho?.status === 'connected';
-                if (!onboardingCompleted && !completed && retryResult.inventoryCount === 0 && !hasZohoConnected) {
-                  setNeedsOnboarding(true);
+                localStorage.removeItem('signup_in_progress');
+                if (retryResult) {
+                  const completed = retryResult.user.onboardingCompleted === true;
+                  if (completed) {
+                    setOnboardingCompleted(true);
+                    localStorage.setItem('onboardingCompleted', 'true');
+                    localStorage.setItem('onboardingUid', user.id);
+                  }
+                  localStorage.setItem('organizationId', retryResult.organization.id);
+                  setAuthData({ user: retryResult.user, organization: retryResult.organization });
+                  startIdleTimer();
+                  const hasZohoConnected = retryResult.organization.integrations?.zoho?.status === 'connected';
+                  if (!onboardingCompleted && !completed && retryResult.inventoryCount === 0 && !hasZohoConnected) {
+                    setNeedsOnboarding(true);
+                  } else {
+                    setNeedsOnboarding(false);
+                  }
                 } else {
-                  setNeedsOnboarding(false);
+                  addToast({ message: 'Account setup incomplete. Please try signing up again.', type: 'error' });
+                  await supabaseSignOut();
                 }
               } else {
-                console.log('❌ Profile still not found after retries — signing out');
-                addToast({ message: 'Account setup incomplete. Please try signing up again.', type: 'error' });
-                await supabaseSignOut();
+                // Existing user — profile lookup returned nothing. Could be a transient
+                // DB error. Do NOT sign them out; just show a toast and keep the session.
+                console.warn('⚠️ getUserData returned null for existing user — keeping session');
+                addToastRef.current({ message: 'Could not load profile. Please refresh the page.', type: 'error' });
               }
-            } else {
-              console.log('⚠️ Existing user with no profile — signing out');
-              addToast({ message: 'Account setup incomplete. Please try signing up again.', type: 'error' });
+            }
+          } catch (error: any) {
+            console.error('❌ Error fetching user data:', error);
+            // Show an error toast but do NOT sign the user out for transient errors.
+            // Only sign out if there is no existing authData (i.e., this is the first load).
+            addToastRef.current({ message: 'Failed to load profile — please refresh.', type: 'error' });
+            if (!authData) {
+              // First load failed — nothing useful to show, sign out cleanly
               await supabaseSignOut();
             }
+          } finally {
+            isLoadingUserDataRef.current = false;
           }
-        } catch (error: any) {
-          console.error('❌ Error fetching user data:', error);
-          console.error('❌ Full error details:', {
-            message: error.message,
-            code: error.code,
-            stack: error.stack
-          });
-          setLoadingMessage('Database connection error...');
-          
-          if (error.message.includes('Firestore') || error.message.includes('timeout')) {
-            addToastRef.current({ 
-              message: 'Database connection failed. Please check if Firestore is enabled in your Firebase project.', 
-              type: 'error' 
-            });
-          } else {
-            addToastRef.current({ message: 'Failed to fetch user data. Please try signing out and back in.', type: 'error' });
-          }
-          
-          // Sign out user on data fetch errors (except database setup issues)
-          if (!error.message.includes('Firestore') && !error.message.includes('timeout')) {
-            await supabaseSignOut();
-          }
-        } finally {
-          isLoadingUserDataRef.current = false;
+        } else {
+          // SIGNED_OUT
+          console.log('🚪 User signed out, clearing state');
+          setFirebaseUser(null);
+          setAuthData(null);
+          setNeedsOnboarding(false);
+          stopIdleTimer();
+          setShowIdleWarning(false);
+          setWarningCountdown(30);
         }
-      } else {
-        // User signed out
-        console.log('🚪 User signed out, clearing state');
-        setLoadingMessage('Initializing...');
-        setFirebaseUser(null);
-        setAuthData(null);
-        setNeedsOnboarding(false);
-        // Keep onboardingCompleted persistent across signouts
-        
-        console.log('✅ Cleanup complete');
-        
-        // Stop idle timer when user signs out
-        stopIdleTimer();
-        
-        // Clear any lingering warning states
-        setShowIdleWarning(false);
-        setWarningCountdown(30);
-      }
-      setIsLoading(false);
+        setIsLoading(false);
       } catch (error) {
         console.error('❌ Error in auth state change handler:', error);
         if (mountedRef.current) {
           setIsLoading(false);
-          addToastRef.current({ 
-            message: 'Authentication error occurred. Please refresh the page.', 
-            type: 'error' 
-          });
         }
       }
     });
