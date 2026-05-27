@@ -439,85 +439,68 @@ export const AppProvider: React.FC<{ children: ReactNode, user: User, organizati
             return () => {};
         }
 
-        // Helper: re-fetch inventory and update state
-        const refreshInventory = async () => {
+        // ── Row mappers ───────────────────────────────────────────────────────
+        // Convert raw Supabase rows to the frontend types used by the reducer.
+        // Called directly from payload.new / payload.old — no re-fetch needed.
+        const mapInvRow = (r: any): InventoryItem => ({
+            id: r.id, organizationId: r.org_id, name: r.name, sku: r.sku,
+            category: r.category || '', stock: r.quantity ?? 0, threshold: r.min_quantity ?? 10,
+            price: r.unit_price, cost: r.cost_price, unit: r.unit,
+            description: r.description, source: r.source || 'manual',
+            isPriority: r.is_priority, location: r.location,
+            lastUpdated: r.updated_at,
+        });
+
+        const mapUserRow = (r: any): User => ({
+            uid: r.id, name: r.full_name || r.email, email: r.email,
+            role: r.role, organizationId: r.org_id,
+        });
+
+        const mapLogRow = (r: any): ActivityLogEntry => ({
+            id: r.id, organizationId: r.org_id, type: r.type,
+            action: r.type,
+            user: r.actor_id || 'System',
+            userName: r.actor_id || 'System',
+            timestamp: r.created_at, details: r.details,
+            entityType: r.entity_type, entityId: r.entity_id,
+        });
+
+        // ── Backfill helpers (called once on SUBSCRIBED) ──────────────────────
+        // These catch any rows that changed between the initial loadData() call
+        // and the moment the Realtime subscription became active.
+        const backfillInventory = async () => {
             const { data } = await supabase
-                .from('inventory_items')
-                .select('*')
-                .eq('org_id', orgId)
-                .eq('is_active', true)
+                .from('inventory_items').select('*')
+                .eq('org_id', orgId).eq('is_active', true)
                 .order('updated_at', { ascending: false });
-            if (data) {
-                const mapped: InventoryItem[] = data.map((r: any) => ({
-                    id: r.id, organizationId: r.org_id, name: r.name, sku: r.sku,
-                    category: r.category || '', stock: r.quantity ?? 0, threshold: r.min_quantity ?? 10,
-                    price: r.unit_price, cost: r.cost_price, unit: r.unit,
-                    description: r.description, source: r.source || 'manual',
-                    isPriority: r.is_priority, location: r.location,
-                    lastUpdated: r.updated_at,
-                }));
-                dispatch({ type: 'SET_INVENTORY', payload: sortByUsage(mapped) });
-            }
+            if (data) dispatch({ type: 'SET_INVENTORY', payload: sortByUsage(data.map(mapInvRow)) });
         };
 
-        // Helper: re-fetch activity logs
-        const refreshLogs = async () => {
+        const backfillLogs = async () => {
             const { data } = await supabase
-                .from('activity_logs')
-                .select('*')
-                .eq('org_id', orgId)
-                .order('created_at', { ascending: false })
-                .limit(200);
-            if (data) {
-                const mapped: ActivityLogEntry[] = data.map((r: any) => ({
-                    id: r.id, organizationId: r.org_id, type: r.type,
-                    action: r.type,   // ActivityLogEntry.action maps to Supabase activity_logs.type
-                    user: getUserDisplayName(r.actor_id, state.users),
-                    userName: getUserDisplayName(r.actor_id, state.users),
-                    timestamp: r.created_at, details: r.details,
-                    entityType: r.entity_type, entityId: r.entity_id,
-                }));
-                dispatch({ type: 'SET_ACTIVITY_LOGS', payload: mapped });
-            }
+                .from('activity_logs').select('*')
+                .eq('org_id', orgId).order('created_at', { ascending: false }).limit(200);
+            if (data) dispatch({ type: 'SET_ACTIVITY_LOGS', payload: data.map(mapLogRow) });
         };
 
-        // Helper: re-fetch users
-        const refreshUsers = async () => {
+        const backfillUsers = async () => {
             const { data } = await supabase
-                .from('users')
-                .select('*')
-                .eq('org_id', orgId)
-                .eq('is_active', true);
-            if (data) {
-                const mapped: User[] = data.map((r: any) => ({
-                    uid: r.id, name: r.full_name || r.email, email: r.email,
-                    role: r.role, organizationId: r.org_id,
-                }));
-                dispatch({ type: 'SET_USERS', payload: mapped });
-            }
+                .from('users').select('*').eq('org_id', orgId).eq('is_active', true);
+            if (data) dispatch({ type: 'SET_USERS', payload: data.map(mapUserRow) });
         };
 
-        // Helper: re-fetch approvals
+        // ── Re-fetch helpers (for infrequent tables that use window events) ───
         const refreshApprovals = async () => {
             const { data } = await supabase
-                .from('approval_requests')
-                .select('*')
-                .eq('org_id', orgId)
-                .order('created_at', { ascending: false })
-                .limit(200);
-            if (data) {
-                window.dispatchEvent(new CustomEvent('approvalsUpdate', { detail: data }));
-            }
+                .from('approval_requests').select('*')
+                .eq('org_id', orgId).order('created_at', { ascending: false }).limit(200);
+            if (data) window.dispatchEvent(new CustomEvent('approvalsUpdate', { detail: data }));
         };
 
-        // Helper: re-fetch stock take sessions
         const refreshStockTake = async () => {
             const { data } = await supabase
-                .from('stock_take_sessions')
-                .select('*')
-                .eq('org_id', orgId)
-                .order('started_at', { ascending: false })
-                .limit(50);
+                .from('stock_take_sessions').select('*')
+                .eq('org_id', orgId).order('started_at', { ascending: false }).limit(50);
             if (data) {
                 const newActive = data.filter(
                     (s: any) => s.status === 'open' && !seenStockTakeSessionIds.current.has(s.id)
@@ -541,42 +524,66 @@ export const AppProvider: React.FC<{ children: ReactNode, user: User, organizati
             }
         };
 
-        // ── ONE channel, ALL handlers chained before .subscribe() ──────────
-        // Supabase rule: ALL .on() calls MUST come before .subscribe().
-        // Using 5 separate channels caused a race where the effect could re-run
-        // (or React StrictMode could double-invoke it) before cleanup removed the
-        // old channels — the same channel name would be returned already-subscribed
-        // and calling .on() on it threw "cannot add postgres_changes callbacks
-        // after subscribe()".  One merged channel eliminates all of that.
+        // ── ONE merged channel — ALL .on() calls before .subscribe() ─────────
+        // SDK rule: calling .on() after .subscribe() throws
+        // "cannot add postgres_changes callbacks after subscribe()".
+        //
+        // Inventory, users, and activity_logs are PAYLOAD-DRIVEN:
+        //   payload.new  → dispatch ADD_ITEM / UPDATE_ITEM / ADD_USER / etc.
+        //   payload.old  → dispatch DELETE_ITEM / DELETE_USER
+        // This avoids a full SELECT on every change event.
+        //
+        // Approval requests and stock-take sessions keep the re-fetch pattern
+        // because they drive window.dispatchEvent used by other components.
         const merged = supabase
             .channel(`ctx:${orgId}`)
+            // ── inventory_items ───────────────────────────────────────────────
             .on('postgres_changes',
-                { event: '*', schema: 'public', table: 'inventory_items', filter: `org_id=eq.${orgId}` },
-                () => { refreshInventory(); })
+                { event: 'INSERT', schema: 'public', table: 'inventory_items', filter: `org_id=eq.${orgId}` },
+                (payload) => { dispatch({ type: 'ADD_ITEM', payload: mapInvRow(payload.new) }); })
+            .on('postgres_changes',
+                { event: 'UPDATE', schema: 'public', table: 'inventory_items', filter: `org_id=eq.${orgId}` },
+                (payload) => { dispatch({ type: 'UPDATE_ITEM', payload: mapInvRow(payload.new) }); })
+            .on('postgres_changes',
+                { event: 'DELETE', schema: 'public', table: 'inventory_items', filter: `org_id=eq.${orgId}` },
+                (payload) => { dispatch({ type: 'DELETE_ITEM', payload: (payload.old as any).id }); })
+            // ── activity_logs ─────────────────────────────────────────────────
             .on('postgres_changes',
                 { event: 'INSERT', schema: 'public', table: 'activity_logs', filter: `org_id=eq.${orgId}` },
-                () => { refreshLogs(); })
+                (payload) => { dispatch({ type: 'ADD_REALTIME_LOG', payload: mapLogRow(payload.new) }); })
+            // ── users ─────────────────────────────────────────────────────────
             .on('postgres_changes',
-                { event: '*', schema: 'public', table: 'users', filter: `org_id=eq.${orgId}` },
-                () => { refreshUsers(); })
+                { event: 'INSERT', schema: 'public', table: 'users', filter: `org_id=eq.${orgId}` },
+                (payload) => { dispatch({ type: 'ADD_USER', payload: mapUserRow(payload.new) }); })
+            .on('postgres_changes',
+                { event: 'UPDATE', schema: 'public', table: 'users', filter: `org_id=eq.${orgId}` },
+                (payload) => { dispatch({ type: 'UPDATE_USER', payload: mapUserRow(payload.new) }); })
+            .on('postgres_changes',
+                { event: 'DELETE', schema: 'public', table: 'users', filter: `org_id=eq.${orgId}` },
+                (payload) => { dispatch({ type: 'DELETE_USER', payload: (payload.old as any).id }); })
+            // ── approval_requests (re-fetch — drives window events) ───────────
             .on('postgres_changes',
                 { event: '*', schema: 'public', table: 'approval_requests', filter: `org_id=eq.${orgId}` },
                 () => { refreshApprovals(); })
+            // ── stock_take_sessions (re-fetch — drives notifications) ─────────
             .on('postgres_changes',
                 { event: '*', schema: 'public', table: 'stock_take_sessions', filter: `org_id=eq.${orgId}` },
                 () => { refreshStockTake(); })
             .subscribe((status) => {
                 if (status === 'SUBSCRIBED') {
                     console.log(`🔔 AppContext Realtime channel active for org ${orgId}`);
+                    // Backfill: catch rows that changed between loadData() and
+                    // the moment this subscription became active.
+                    backfillInventory();
+                    backfillLogs();
+                    backfillUsers();
+                    refreshApprovals();
+                    refreshStockTake();
+                }
+                if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+                    console.warn(`⚠️ Realtime channel ${status} for org ${orgId} — will reconnect`);
                 }
             });
-
-        // Initial fetch for all data
-        refreshInventory();
-        refreshLogs();
-        refreshUsers();
-        refreshApprovals();
-        refreshStockTake();
 
         return () => {
             supabase.removeChannel(merged);

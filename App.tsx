@@ -13,7 +13,7 @@ import { activityLogger } from './services/activityLogger';
 import { useToast } from './hooks/useToast';
 import { useIdleTimer } from './hooks/useIdleTimer';
 import useNotifications from './hooks/useNotifications';
-import { supabase, signOut as supabaseSignOut } from './services/supabase';
+import { supabase, signOut as supabaseSignOut, initTokenCache } from './services/supabase';
 import type { User as SupabaseUser } from '@supabase/supabase-js';
 // Import user invite helper for console access
 import './utils/userInviteHelper';
@@ -191,6 +191,13 @@ const AppContent: React.FC = () => {
       type: 'info' 
     });
   }, [resetIdleTimer, addToast]);
+
+  // Warm the token cache once on mount so getAccessToken() is O(1) for all
+  // API calls that follow. The cleanup unsubscribes the cache listener.
+  useEffect(() => {
+    const cleanupTokenCache = initTokenCache();
+    return cleanupTokenCache;
+  }, []);
 
   useEffect(() => {
     console.log('🔐 Initializing auth');

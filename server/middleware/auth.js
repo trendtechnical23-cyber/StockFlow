@@ -79,6 +79,10 @@ const verifyFirebaseToken = async (req, res, next) => {
       roles: publicUser?.role ? [publicUser.role] : [],
     };
 
+    // Expose the raw token so downstream middleware (attachUserClient) and
+    // route handlers can create RLS-enforced user-scoped Supabase clients.
+    req.supabaseToken = token;
+
     console.log(`✅ Token verified for ${req.user.email} (org: ${req.user.orgId})`);
     next();
 
