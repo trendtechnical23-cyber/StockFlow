@@ -164,7 +164,8 @@ export const getUserByEmail = async (email: string): Promise<{
 export const getUserData = async (uid: string): Promise<{
   user: User,
   organization: Organization,
-  inventoryCount: number
+  inventoryCount: number,
+  onboardingCompleted: boolean,
 } | null> => {
   console.log('👤 Getting user data for UID:', uid);
   try {
@@ -180,20 +181,23 @@ export const getUserData = async (uid: string): Promise<{
         if (userErr) throw userErr;
 
         if (userData) {
-          // Fetch org and inventory count in parallel — keep this path lean
-          // (organization_settings is NOT fetched here; onboarding state is
-          //  managed via localStorage + a background Supabase write in
-          //  markOnboardingComplete so it doesn't block the auth critical path)
-          const [orgResult, invResult] = await Promise.all([
+          // Fetch org, inventory count, and onboarding flag in parallel
+          const [orgResult, invResult, settingsResult] = await Promise.all([
             supabase.from('organizations').select('*').eq('id', userData.org_id).maybeSingle(),
             supabase.from('inventory_items')
               .select('id', { count: 'exact', head: true })
               .eq('org_id', userData.org_id)
               .eq('is_active', true),
+            supabase.from('organization_settings')
+              .select('notification_preferences')
+              .eq('org_id', userData.org_id)
+              .maybeSingle(),
           ]);
 
           const orgData = orgResult.data;
           const invCount = invResult.count ?? 0;
+          const onboardingCompleted =
+            settingsResult.data?.notification_preferences?.onboarding_completed === true;
 
           return {
             user: {
@@ -211,6 +215,7 @@ export const getUserData = async (uid: string): Promise<{
               subscription: { plan: (orgData?.plan === 'pro' ? 'Pro' : 'Free') as any, status: 'active' as const }
             } as Organization,
             inventoryCount: invCount,
+            onboardingCompleted,
           };
         }
 

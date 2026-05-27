@@ -4,23 +4,48 @@
  * Uses the SERVICE ROLE key — this bypasses RLS.
  * NEVER expose this key to the frontend.
  *
- * Usage in route files:
- *   const { supabase } = require('../supabaseAdmin');
- *   const { data, error } = await supabase.from('inventory_items').select('*');
+ * IMPORTANT: Lazy initialization — the client is only created on first use,
+ * NOT at require() time. This prevents the module from throwing synchronously
+ * when env vars are absent (which would cause safeMount to install a 503
+ * handler for every route that imports this module).
+ *
+ * Railway env vars required:
+ *   SUPABASE_URL             = https://xxxx.supabase.co
+ *   SUPABASE_SERVICE_ROLE_KEY = eyJ...  (secret — never expose to frontend)
  */
 const { createClient } = require('@supabase/supabase-js');
 
-if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
-  console.warn('[SUPABASE] Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY — Supabase routes will fail');
+let _client = null;
+
+function getClient() {
+  if (_client) return _client;
+
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!url || !key) {
+    throw new Error(
+      '[SUPABASE ADMIN] Missing env vars: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY ' +
+      'must be set in Railway Variables. ' +
+      'Go to Railway → your service → Variables and add them.'
+    );
+  }
+
+  _client = createClient(url, key, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
+
+  console.log('[SUPABASE ADMIN] Client initialized ✅');
+  return _client;
 }
 
-const supabase = createClient(
-  process.env.SUPABASE_URL        || '',
-  process.env.SUPABASE_SERVICE_ROLE_KEY || '',
+// Export a Proxy so callers can still destructure { supabase } and call
+// supabase.from(...) etc. — the real client is only instantiated on first call.
+const supabase = new Proxy(
+  {},
   {
-    auth: {
-      autoRefreshToken: false,
-      persistSession:   false,
+    get(_target, prop) {
+      return getClient()[prop];
     },
   }
 );

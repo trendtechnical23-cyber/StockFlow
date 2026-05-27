@@ -232,9 +232,15 @@ const AppContent: React.FC = () => {
           console.log('✅ Profile loaded:', result.user.name, '/', result.organization.name);
           setLoadingMessage('Setting up dashboard...');
 
-          const completed = localStorage.getItem('onboardingCompleted') === 'true';
+          // Supabase is the authoritative source — localStorage is a fast-path cache.
+          // If Supabase says completed, sync it back to localStorage so future
+          // reads are instant. This fixes the loop when localStorage was cleared
+          // (incognito, new device, browser data wipe, etc.)
+          const completedLocally = localStorage.getItem('onboardingCompleted') === 'true';
+          const completed = completedLocally || result.onboardingCompleted;
           if (completed) {
             setOnboardingCompleted(true);
+            localStorage.setItem('onboardingCompleted', 'true');
             localStorage.setItem('onboardingUid', user.id);
           }
           localStorage.setItem('organizationId', result.organization.id);
@@ -344,9 +350,10 @@ const AppContent: React.FC = () => {
       }
 
       if (event === 'SIGNED_IN' && session?.user) {
-        // Skip if this exact user is already loaded — Supabase emits SIGNED_IN on
-        // reconnects, multi-tab syncs, and session recoveries even when nothing changed.
-        if (loadedUserIdRef.current === session.user.id && authData) {
+        // loadedUserIdRef is a ref (not state) so it's always current even in this
+        // stale closure. Do NOT check authData here — it's captured at mount time
+        // (always null) and would make this guard permanently ineffective.
+        if (loadedUserIdRef.current === session.user.id) {
           console.log('⏭️ SIGNED_IN skipped — user already loaded');
           return;
         }

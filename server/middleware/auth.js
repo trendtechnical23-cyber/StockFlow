@@ -8,12 +8,17 @@
  */
 const { createClient } = require('@supabase/supabase-js');
 
-// Use the anon key for token verification (getUser validates the Bearer token)
-const supabaseVerifier = createClient(
-  process.env.SUPABASE_URL       || '',
-  process.env.SUPABASE_ANON_KEY  || '',
-  { auth: { autoRefreshToken: false, persistSession: false } }
-);
+// Lazy verifier client — only created on first request, not at require() time.
+// This prevents a synchronous throw when SUPABASE_URL is absent from env vars.
+let _verifier = null;
+function getVerifier() {
+  if (_verifier) return _verifier;
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_ANON_KEY;
+  if (!url || !key) throw new Error('Missing SUPABASE_URL or SUPABASE_ANON_KEY env vars');
+  _verifier = createClient(url, key, { auth: { autoRefreshToken: false, persistSession: false } });
+  return _verifier;
+}
 
 // Service-role client for org lookups that bypass RLS
 const { supabase: supabaseAdmin } = require('../supabaseAdmin');
@@ -41,7 +46,7 @@ const verifyFirebaseToken = async (req, res, next) => {
     }
 
     // Verify the JWT and get the Supabase auth user
-    const { data: { user }, error } = await supabaseVerifier.auth.getUser(token);
+    const { data: { user }, error } = await getVerifier().auth.getUser(token);
 
     if (error || !user) {
       console.warn('❌ Token verification failed:', error?.message);
