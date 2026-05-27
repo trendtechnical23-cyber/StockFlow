@@ -52,6 +52,7 @@ const AppContent: React.FC = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [loadingMessage, setLoadingMessage] = useState('Initializing...');
   const isLoadingUserDataRef = React.useRef(false);
+  const loadedUserIdRef = React.useRef<string | null>(null);
   const [isLoadingUserData, setIsLoadingUserData] = useState(false);
   
   // Auto logout configuration
@@ -206,8 +207,11 @@ const AppContent: React.FC = () => {
 
       isLoadingUserDataRef.current = true;
       setFirebaseUser(user);
-      setIsLoading(true);
-      setLoadingMessage('Checking user profile...');
+      // Only show fullscreen spinner on first load — background refreshes are silent
+      if (!authData) {
+        setIsLoading(true);
+        setLoadingMessage('Checking user profile...');
+      }
 
       // Clear onboarding flags when a DIFFERENT user logs in
       const storedUid = localStorage.getItem('onboardingUid');
@@ -235,6 +239,7 @@ const AppContent: React.FC = () => {
           }
           localStorage.setItem('organizationId', result.organization.id);
           setAuthData({ user: result.user, organization: result.organization });
+          loadedUserIdRef.current = user.id;
 
           const hasZohoConnected = result.organization.integrations?.zoho?.status === 'connected';
           if (!completed && result.inventoryCount === 0 && !hasZohoConnected) {
@@ -243,9 +248,8 @@ const AppContent: React.FC = () => {
             setNeedsOnboarding(false);
           }
 
-          startIdleTimer();
-
           // FCM — optional, silent fail
+          // (idle timer is started by the dedicated useEffect below — not here)
           initializeMessaging().then(() => requestFCMPermission()).catch(() => {});
 
         } else {
@@ -272,7 +276,7 @@ const AppContent: React.FC = () => {
               }
               localStorage.setItem('organizationId', retryResult.organization.id);
               setAuthData({ user: retryResult.user, organization: retryResult.organization });
-              startIdleTimer();
+              loadedUserIdRef.current = user.id;
               const hasZoho = retryResult.organization.integrations?.zoho?.status === 'connected';
               setNeedsOnboarding(!completed && retryResult.inventoryCount === 0 && !hasZoho);
             } else {
@@ -300,10 +304,15 @@ const AppContent: React.FC = () => {
     supabase.auth.getSession().then(({ data: { session }, error }) => {
       if (!mountedRef.current) return;
 
-      // Poisoned/expired refresh token → wipe stale auth storage and show login
+      // Poisoned/expired refresh token → wipe local auth storage and show login.
+      // scope:'local' clears only this tab's storage without round-tripping the server,
+      // preventing recursive auth events that would restart the oscillation loop.
       if (error || (error as any)?.message?.includes('Refresh Token')) {
-        console.warn('🔑 Stale refresh token — clearing auth storage');
-        supabase.auth.signOut(); // clears Supabase's own storage
+        console.warn('🔑 Stale refresh token — clearing local auth storage');
+        supabase.auth.signOut({ scope: 'local' });
+        loadedUserIdRef.current = null;
+        setFirebaseUser(null);
+        setAuthData(null);
         setIsLoading(false);
         return;
       }
@@ -335,7 +344,12 @@ const AppContent: React.FC = () => {
       }
 
       if (event === 'SIGNED_IN' && session?.user) {
-        // loadProfile is guarded — duplicate calls for the same session are no-ops
+        // Skip if this exact user is already loaded — Supabase emits SIGNED_IN on
+        // reconnects, multi-tab syncs, and session recoveries even when nothing changed.
+        if (loadedUserIdRef.current === session.user.id && authData) {
+          console.log('⏭️ SIGNED_IN skipped — user already loaded');
+          return;
+        }
         loadProfile(session.user);
         return;
       }
@@ -348,6 +362,7 @@ const AppContent: React.FC = () => {
           return;
         }
         console.log('🚪 User signed out');
+        loadedUserIdRef.current = null;
         setFirebaseUser(null);
         setAuthData(null);
         setNeedsOnboarding(false);
