@@ -87,7 +87,7 @@ const AnalyticsCards: React.FC<AnalyticsCardsProps> = ({
     }, {} as { [user: string]: number });
 
     const actionTypes = recentLogs.reduce((acc, log) => {
-      const actionType = log.action.split(' ')[0]; // Get first word of action
+      const actionType = (log.action || log.type || 'unknown').split(' ')[0];
       acc[actionType] = (acc[actionType] || 0) + 1;
       return acc;
     }, {} as { [action: string]: number });

@@ -23,11 +23,12 @@ const ActivityLog: React.FC<ActivityLogProps> = ({ logs }) => {
     }
     
     // If not found in users, extract from email if possible
-    if (userId.includes('@')) {
+    if (userId && userId.includes('@')) {
         return userId.split('@')[0];
     }
-    
+
     // Fallback to shortened userId
+    if (!userId) return 'Unknown User';
     return userId.length > 10 ? userId.substring(0, 8) : userId;
   };
   

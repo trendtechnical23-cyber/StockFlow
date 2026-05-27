@@ -471,6 +471,7 @@ export const AppProvider: React.FC<{ children: ReactNode, user: User, organizati
             if (data) {
                 const mapped: ActivityLogEntry[] = data.map((r: any) => ({
                     id: r.id, organizationId: r.org_id, type: r.type,
+                    action: r.type,   // ActivityLogEntry.action maps to Supabase activity_logs.type
                     user: getUserDisplayName(r.actor_id, state.users),
                     userName: getUserDisplayName(r.actor_id, state.users),
                     timestamp: r.created_at, details: r.details,
