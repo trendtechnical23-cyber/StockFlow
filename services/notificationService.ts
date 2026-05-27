@@ -50,6 +50,15 @@ const rowToNotification = (row: any, userId: string): Notification => ({
 }) as Notification;
 
 class NotificationService {
+  // Singleton channel management — ONE channel per (org, user) pair shared across all callers.
+  // Multiple components (Header, Sidebar, etc.) call subscribeToNotifications(); they all
+  // receive the same data through this shared set of callbacks.
+  private activeChannel: RealtimeChannel | null = null;
+  private activeKey: string | null = null;
+  private callbacks: Set<(n: Notification[]) => void> = new Set();
+  private lastNotifications: Notification[] = [];
+
+  /** @deprecated kept for backwards compat if anything outside uses it */
   private channels: Map<string, RealtimeChannel> = new Map();
 
   /** Create a notification */
@@ -88,13 +97,28 @@ class NotificationService {
     }
   }
 
-  /** Subscribe to a user's notifications (direct + org broadcasts) in real time */
+  /** Subscribe to a user's notifications (direct + org broadcasts) in real time.
+   *
+   * ARCHITECTURE: Singleton channel — one Supabase Realtime channel per (org, user) pair,
+   * shared across all callers (Header, Sidebar, useNotifications, etc.). This prevents:
+   *   - "cannot add postgres_changes callbacks after subscribe()" (Supabase throws when
+   *     .on() is called on an already-subscribed channel)
+   *   - Multiple competing channels for the same data
+   *   - React StrictMode double-mount creating duplicate subscriptions
+   *
+   * Supabase Realtime rule: ALL .on() handlers MUST be chained BEFORE .subscribe().
+   *
+   * Returns an unsubscribe function. The channel is only torn down when the LAST
+   * subscriber calls its unsubscribe function.
+   */
   subscribeToNotifications(
     organizationId: string,
     userId: string,
     onUpdate: (notifications: Notification[]) => void,
     maxCount: number = 50
   ): () => void {
+    const key = `${organizationId}_${userId}`;
+
     const fetchAll = async () => {
       try {
         const { data, error } = await supabase
@@ -107,31 +131,58 @@ class NotificationService {
 
         if (error) throw error;
         const notifications = (data ?? []).map(r => rowToNotification(r, userId));
-        console.log(`📬 Received ${notifications.length} notifications for user ${userId}`);
-        onUpdate(notifications);
-      } catch (error) {
-        console.error('❌ Failed to fetch notifications:', error);
-        onUpdate([]);
+        this.lastNotifications = notifications;
+        // Notify every subscriber (Header, Sidebar, etc.)
+        this.callbacks.forEach(cb => cb(notifications));
+      } catch (err) {
+        console.error('❌ Failed to fetch notifications:', err);
+        this.callbacks.forEach(cb => cb([]));
       }
     };
 
-    // Initial load
-    fetchAll();
+    // Register this caller's callback
+    this.callbacks.add(onUpdate);
 
-    // Live updates
-    const key = `${organizationId}_${userId}`;
-    const channel = supabase
-      .channel(`notifications:${key}`)
-      .on('postgres_changes',
-        { event: '*', schema: 'public', table: 'notifications', filter: `org_id=eq.${organizationId}` },
-        () => { fetchAll(); })
-      .subscribe();
+    if (this.activeKey === key && this.activeChannel) {
+      // Channel already open for this (org, user) — give this caller the cached data
+      // immediately so it doesn't render empty while waiting for the next DB event.
+      onUpdate(this.lastNotifications);
+    } else {
+      // Different (org, user) pair or no channel yet — tear down old channel first.
+      if (this.activeChannel) {
+        supabase.removeChannel(this.activeChannel);
+        this.activeChannel = null;
+      }
+      this.activeKey = key;
+      this.lastNotifications = [];
 
-    this.channels.set(key, channel);
+      // Initial fetch
+      fetchAll();
 
+      // CRITICAL: chain ALL .on() handlers BEFORE .subscribe()
+      this.activeChannel = supabase
+        .channel(`notifications:${key}`) // stable name — one channel per key
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'notifications', filter: `org_id=eq.${organizationId}` },
+          () => { fetchAll(); }
+        )
+        .subscribe((status) => {
+          if (status === 'SUBSCRIBED') {
+            console.log(`🔔 Notifications channel active for org ${organizationId}`);
+          }
+        });
+    }
+
+    // Return per-caller unsubscribe — channel only removed when last caller unsubscribes
     return () => {
-      const ch = this.channels.get(key);
-      if (ch) { supabase.removeChannel(ch); this.channels.delete(key); }
+      this.callbacks.delete(onUpdate);
+      if (this.callbacks.size === 0 && this.activeChannel) {
+        supabase.removeChannel(this.activeChannel);
+        this.activeChannel = null;
+        this.activeKey = null;
+        this.lastNotifications = [];
+      }
     };
   }
 
