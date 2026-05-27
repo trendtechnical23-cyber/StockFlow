@@ -241,11 +241,8 @@ const AppContent: React.FC = () => {
               console.log('✅ User data loaded:', result.user.name, '/', result.organization.name);
               setLoadingMessage('Setting up dashboard...');
 
-              // Server flag (stored in organization_settings JSONB)
-              const serverCompleted = result.user.onboardingCompleted === true;
-              // Local flag — read LIVE from localStorage (not stale closure)
-              const localCompleted = localStorage.getItem('onboardingCompleted') === 'true';
-              const completed = serverCompleted || localCompleted;
+              // Read LIVE from localStorage — not from the stale useEffect closure
+              const completed = localStorage.getItem('onboardingCompleted') === 'true';
 
               if (completed) {
                 setOnboardingCompleted(true);
@@ -288,9 +285,7 @@ const AppContent: React.FC = () => {
                 }
                 localStorage.removeItem('signup_in_progress');
                 if (retryResult) {
-                  const serverCompleted = retryResult.user.onboardingCompleted === true;
-                  const localCompleted = localStorage.getItem('onboardingCompleted') === 'true';
-                  const completed = serverCompleted || localCompleted;
+                  const completed = localStorage.getItem('onboardingCompleted') === 'true';
                   if (completed) {
                     setOnboardingCompleted(true);
                     localStorage.setItem('onboardingCompleted', 'true');

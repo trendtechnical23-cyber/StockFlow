@@ -180,15 +180,19 @@ export const getUserData = async (uid: string): Promise<{
         if (userErr) throw userErr;
 
         if (userData) {
-          // Fetch org, settings, and inventory count in parallel
-          const [orgResult, settingsResult, invResult] = await Promise.all([
+          // Fetch org and inventory count in parallel — keep this path lean
+          // (organization_settings is NOT fetched here; onboarding state is
+          //  managed via localStorage + a background Supabase write in
+          //  markOnboardingComplete so it doesn't block the auth critical path)
+          const [orgResult, invResult] = await Promise.all([
             supabase.from('organizations').select('*').eq('id', userData.org_id).maybeSingle(),
-            supabase.from('organization_settings').select('notification_preferences').eq('org_id', userData.org_id).maybeSingle(),
-            supabase.from('inventory_items').select('id', { count: 'exact', head: true }).eq('org_id', userData.org_id).eq('is_active', true),
+            supabase.from('inventory_items')
+              .select('id', { count: 'exact', head: true })
+              .eq('org_id', userData.org_id)
+              .eq('is_active', true),
           ]);
 
           const orgData = orgResult.data;
-          const serverOnboardingDone = settingsResult.data?.notification_preferences?.onboarding_completed === true;
           const invCount = invResult.count ?? 0;
 
           return {
@@ -198,7 +202,6 @@ export const getUserData = async (uid: string): Promise<{
               email: userData.email,
               role: userData.role as UserRole,
               organizationId: userData.org_id,
-              onboardingCompleted: serverOnboardingDone,
             } as User,
             organization: {
               id: orgData?.id ?? userData.org_id,

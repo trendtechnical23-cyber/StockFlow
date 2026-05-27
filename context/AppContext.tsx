@@ -591,10 +591,6 @@ export const AppProvider: React.FC<{ children: ReactNode, user: User, organizati
             try {
                 dispatch({ type: 'SET_ERROR', payload: null });
                 console.log('🏢 Loading organization data for:', organization.name);
-                
-                // Add small delay to ensure Firestore data is consistent
-                await new Promise(resolve => setTimeout(resolve, 500));
-                
                 const data = await api.getOrganizationData(organization.id);
                 console.log('✅ Organization data loaded successfully:', data.inventory.length, 'items,', data.users.length, 'users,', data.activityLogs.length, 'logs');
             
