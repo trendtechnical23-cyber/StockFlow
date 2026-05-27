@@ -192,161 +192,177 @@ const AppContent: React.FC = () => {
   }, [resetIdleTimer, addToast]);
 
   useEffect(() => {
-    // Guard against unconfigured Firebase
-    console.log('🔐 Setting up Supabase auth state listener');
+    console.log('🔐 Initializing auth');
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-      const user = session?.user ?? null;
+    // ── Shared profile loader ────────────────────────────────────────────
+    // Called from BOTH the initial getSession() and the change listener.
+    // The isLoadingUserDataRef guard ensures it never runs concurrently.
+    const loadProfile = async (user: SupabaseUser) => {
+      if (!mountedRef.current) return;
+      if (isLoadingUserDataRef.current) {
+        console.log('⏭️ loadProfile already in progress — skipping duplicate');
+        return;
+      }
+
+      isLoadingUserDataRef.current = true;
+      setFirebaseUser(user);
+      setIsLoading(true);
+      setLoadingMessage('Checking user profile...');
+
+      // Clear onboarding flags when a DIFFERENT user logs in
+      const storedUid = localStorage.getItem('onboardingUid');
+      if (storedUid && storedUid !== user.id) {
+        localStorage.setItem('onboardingUid', user.id);
+        localStorage.removeItem('onboardingCompleted');
+        localStorage.removeItem('currentView');
+        localStorage.removeItem('pendingView');
+        setOnboardingCompleted(false);
+      }
+
       try {
-        // Mounted guard to avoid state updates after unmount
+        const result = await api.getUserData(user.id);
+
         if (!mountedRef.current) return;
 
-        console.log('🔐 Auth event:', event, '| User:', user ? user.email : 'null');
+        if (result) {
+          console.log('✅ Profile loaded:', result.user.name, '/', result.organization.name);
+          setLoadingMessage('Setting up dashboard...');
 
-        // ── TOKEN_REFRESHED fires every time the tab regains focus (Supabase
-        //    refreshes the JWT proactively). It is NOT a sign-in — just update
-        //    the user ref silently so the rest of the app stays in sync.
-        if (event === 'TOKEN_REFRESHED') {
-          setFirebaseUser(user);
-          return; // do NOT show loading, do NOT re-fetch profile
-        }
-
-        if (user) {
-          // Reset onboarding flag only when a *different* user logs in
-          const storedOnboardingUid = localStorage.getItem('onboardingUid');
-          if (storedOnboardingUid !== user.id) {
-            console.log('🔄 Different user detected, clearing onboarding state');
+          const completed = localStorage.getItem('onboardingCompleted') === 'true';
+          if (completed) {
+            setOnboardingCompleted(true);
             localStorage.setItem('onboardingUid', user.id);
-            localStorage.removeItem('onboardingCompleted');
-            localStorage.removeItem('currentView');
-            localStorage.removeItem('pendingView');
-            setOnboardingCompleted(false);
+          }
+          localStorage.setItem('organizationId', result.organization.id);
+          setAuthData({ user: result.user, organization: result.organization });
+
+          const hasZohoConnected = result.organization.integrations?.zoho?.status === 'connected';
+          if (!completed && result.inventoryCount === 0 && !hasZohoConnected) {
+            setNeedsOnboarding(true);
+          } else {
+            setNeedsOnboarding(false);
           }
 
-          // Prevent multiple simultaneous getUserData calls
-          if (isLoadingUserDataRef.current) {
-            console.log('⏭️ Skipping getUserData — already in progress');
-            return;
-          }
+          startIdleTimer();
 
-          setIsLoading(true);
-          setLoadingMessage('Loading your account...');
-          setFirebaseUser(user);
-          isLoadingUserDataRef.current = true;
-          try {
-            setLoadingMessage('Checking user profile...');
-            const result = await api.getUserData(user.id);
+          // FCM — optional, silent fail
+          initializeMessaging().then(() => requestFCMPermission()).catch(() => {});
 
-            if (result) {
-              console.log('✅ User data loaded:', result.user.name, '/', result.organization.name);
-              setLoadingMessage('Setting up dashboard...');
+        } else {
+          // No profile row — new signup or DB lag
+          const signupTs = localStorage.getItem('signup_in_progress');
+          const isNewSignup = !!signupTs && (Date.now() - parseInt(signupTs, 10)) < 60_000;
 
-              // Read LIVE from localStorage — not from the stale useEffect closure
+          if (isNewSignup) {
+            setLoadingMessage('Completing account setup...');
+            let retryResult = null;
+            for (let i = 1; i <= 5; i++) {
+              await new Promise(r => setTimeout(r, i * 1000));
+              if (!mountedRef.current) return;
+              retryResult = await api.getUserData(user.id);
+              if (retryResult) break;
+            }
+            localStorage.removeItem('signup_in_progress');
+
+            if (retryResult && mountedRef.current) {
               const completed = localStorage.getItem('onboardingCompleted') === 'true';
-
               if (completed) {
                 setOnboardingCompleted(true);
-                localStorage.setItem('onboardingCompleted', 'true');
                 localStorage.setItem('onboardingUid', user.id);
               }
-
-              localStorage.setItem('organizationId', result.organization.id);
-              setAuthData({ user: result.user, organization: result.organization });
-
-              // Initialize FCM messaging (optional — silent fail)
-              initializeMessaging()
-                .then(() => requestFCMPermission())
-                .catch(() => {
-                  console.log('ℹ️ Push notifications unavailable');
-                });
-
-              const hasZohoConnected = result.organization.integrations?.zoho?.status === 'connected';
-              // Only show onboarding if NEITHER the server NOR localStorage says it's done
-              if (!completed && result.inventoryCount === 0 && !hasZohoConnected) {
-                setNeedsOnboarding(true);
-              } else {
-                setNeedsOnboarding(false);
-              }
-
+              localStorage.setItem('organizationId', retryResult.organization.id);
+              setAuthData({ user: retryResult.user, organization: retryResult.organization });
               startIdleTimer();
+              const hasZoho = retryResult.organization.integrations?.zoho?.status === 'connected';
+              setNeedsOnboarding(!completed && retryResult.inventoryCount === 0 && !hasZoho);
             } else {
-              // No profile returned — only force sign-out for a brand-new signup
-              const signupTs = localStorage.getItem('signup_in_progress');
-              const isNewSignup = signupTs !== null && (Date.now() - parseInt(signupTs, 10)) < 60000;
-
-              if (isNewSignup) {
-                console.log('🆕 New signup — retrying getUserData up to 5×');
-                setLoadingMessage('Completing account setup...');
-                let retryResult = null;
-                for (let attempt = 1; attempt <= 5; attempt++) {
-                  await new Promise(r => setTimeout(r, attempt * 1000));
-                  retryResult = await api.getUserData(user.id);
-                  if (retryResult) break;
-                }
-                localStorage.removeItem('signup_in_progress');
-                if (retryResult) {
-                  const completed = localStorage.getItem('onboardingCompleted') === 'true';
-                  if (completed) {
-                    setOnboardingCompleted(true);
-                    localStorage.setItem('onboardingCompleted', 'true');
-                    localStorage.setItem('onboardingUid', user.id);
-                  }
-                  localStorage.setItem('organizationId', retryResult.organization.id);
-                  setAuthData({ user: retryResult.user, organization: retryResult.organization });
-                  startIdleTimer();
-                  const hasZohoConnected = retryResult.organization.integrations?.zoho?.status === 'connected';
-                  if (!completed && retryResult.inventoryCount === 0 && !hasZohoConnected) {
-                    setNeedsOnboarding(true);
-                  } else {
-                    setNeedsOnboarding(false);
-                  }
-                } else {
-                  addToast({ message: 'Account setup incomplete. Please try signing up again.', type: 'error' });
-                  await supabaseSignOut();
-                }
-              } else {
-                // Existing user — profile lookup returned nothing. Could be a transient
-                // DB error. Do NOT sign them out; just show a toast and keep the session.
-                console.warn('⚠️ getUserData returned null for existing user — keeping session');
-                addToastRef.current({ message: 'Could not load profile. Please refresh the page.', type: 'error' });
-              }
-            }
-          } catch (error: any) {
-            console.error('❌ Error fetching user data:', error);
-            // Show an error toast but do NOT sign the user out for transient errors.
-            // Only sign out if there is no existing authData (i.e., this is the first load).
-            addToastRef.current({ message: 'Failed to load profile — please refresh.', type: 'error' });
-            if (!authData) {
-              // First load failed — nothing useful to show, sign out cleanly
+              addToastRef.current({ message: 'Account setup incomplete. Please sign up again.', type: 'error' });
               await supabaseSignOut();
             }
-          } finally {
-            isLoadingUserDataRef.current = false;
+          } else {
+            // Existing user, transient DB error — keep session, show toast
+            console.warn('⚠️ Profile not found for existing user — keeping session');
+            addToastRef.current({ message: 'Could not load profile. Please refresh the page.', type: 'error' });
           }
-        } else {
-          // SIGNED_OUT
-          console.log('🚪 User signed out, clearing state');
-          setFirebaseUser(null);
-          setAuthData(null);
-          setNeedsOnboarding(false);
-          stopIdleTimer();
-          setShowIdleWarning(false);
-          setWarningCountdown(30);
         }
+      } catch (err: any) {
+        console.error('❌ Error loading profile:', err);
+        addToastRef.current({ message: 'Failed to load profile — please refresh.', type: 'error' });
+      } finally {
+        isLoadingUserDataRef.current = false;
+        if (mountedRef.current) setIsLoading(false);
+      }
+    };
+
+    // ── Step 1: authoritative startup check ─────────────────────────────
+    // getSession() is synchronous-ish and does NOT fire auth events.
+    // This is the ONLY thing that drives the initial loading state.
+    supabase.auth.getSession().then(({ data: { session }, error }) => {
+      if (!mountedRef.current) return;
+
+      // Poisoned/expired refresh token → wipe stale auth storage and show login
+      if (error || (error as any)?.message?.includes('Refresh Token')) {
+        console.warn('🔑 Stale refresh token — clearing auth storage');
+        supabase.auth.signOut(); // clears Supabase's own storage
         setIsLoading(false);
-      } catch (error) {
-        console.error('❌ Error in auth state change handler:', error);
-        if (mountedRef.current) {
-          setIsLoading(false);
-        }
+        return;
+      }
+
+      if (session?.user) {
+        loadProfile(session.user);
+      } else {
+        // No session — show login immediately, no spinner
+        setIsLoading(false);
       }
     });
-    
+
+    // ── Step 2: listen for GENUINE future auth changes only ──────────────
+    // INITIAL_SESSION → skip (handled by getSession above)
+    // TOKEN_REFRESHED → skip (background refresh, not a user action)
+    // SIGNED_IN       → load profile (user just logged in via LoginPage)
+    // SIGNED_OUT      → clear state, but ONLY if we're not in an active
+    //                   initial load (transient SIGNED_OUT during token
+    //                   refresh recovery must not destroy a loading session)
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      if (!mountedRef.current) return;
+      console.log('🔐 Auth event:', event);
+
+      if (event === 'INITIAL_SESSION') return; // handled above
+
+      if (event === 'TOKEN_REFRESHED') {
+        setFirebaseUser(session?.user ?? null); // silent sync
+        return;
+      }
+
+      if (event === 'SIGNED_IN' && session?.user) {
+        // loadProfile is guarded — duplicate calls for the same session are no-ops
+        loadProfile(session.user);
+        return;
+      }
+
+      if (event === 'SIGNED_OUT') {
+        // Ignore transient SIGNED_OUT that fires during initial token recovery.
+        // A real sign-out only happens AFTER the user was successfully loaded.
+        if (isLoadingUserDataRef.current) {
+          console.log('⏭️ Ignoring transient SIGNED_OUT during initial load');
+          return;
+        }
+        console.log('🚪 User signed out');
+        setFirebaseUser(null);
+        setAuthData(null);
+        setNeedsOnboarding(false);
+        setLoadingMessage('Initializing...');
+        stopIdleTimer();
+        setShowIdleWarning(false);
+        setWarningCountdown(30);
+        setIsLoading(false);
+      }
+    });
+
     return () => {
-      console.log('🔐 Cleaning up Supabase auth state listener');
       subscription.unsubscribe();
     };
-  }, []); // Empty deps - subscribe only once on mount
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   
   const handleOnboardingComplete = useCallback(async () => {
     setNeedsOnboarding(false);
