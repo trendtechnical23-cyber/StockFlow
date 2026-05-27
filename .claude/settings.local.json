@@ -5,7 +5,8 @@
       "Bash(grep -E \"\\\\.\\(ts|tsx|js|jsx\\)$\")",
       "Bash(npx tsc *)",
       "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\SANDILE\\\\Desktop\\\\stockflow-dashboard \\(google ai\\)\" -Recurse -Depth 2)",
-      "Bash(Select-Object FullName)"
+      "Bash(Select-Object FullName)",
+      "Bash(cd '/c/Users/SANDILE/Desktop/stockflow-dashboard \\(google ai\\)/' && find . -maxdepth 2 -type d | head -30)"
     ]
   }
 }
