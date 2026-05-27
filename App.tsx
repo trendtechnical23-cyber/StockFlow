@@ -241,7 +241,12 @@ const AppContent: React.FC = () => {
               console.log('✅ User data loaded:', result.user.name, '/', result.organization.name);
               setLoadingMessage('Setting up dashboard...');
 
-              const completed = result.user.onboardingCompleted === true;
+              // Server flag (stored in organization_settings JSONB)
+              const serverCompleted = result.user.onboardingCompleted === true;
+              // Local flag — read LIVE from localStorage (not stale closure)
+              const localCompleted = localStorage.getItem('onboardingCompleted') === 'true';
+              const completed = serverCompleted || localCompleted;
+
               if (completed) {
                 setOnboardingCompleted(true);
                 localStorage.setItem('onboardingCompleted', 'true');
@@ -259,7 +264,8 @@ const AppContent: React.FC = () => {
                 });
 
               const hasZohoConnected = result.organization.integrations?.zoho?.status === 'connected';
-              if (!onboardingCompleted && !completed && result.inventoryCount === 0 && !hasZohoConnected) {
+              // Only show onboarding if NEITHER the server NOR localStorage says it's done
+              if (!completed && result.inventoryCount === 0 && !hasZohoConnected) {
                 setNeedsOnboarding(true);
               } else {
                 setNeedsOnboarding(false);
@@ -282,7 +288,9 @@ const AppContent: React.FC = () => {
                 }
                 localStorage.removeItem('signup_in_progress');
                 if (retryResult) {
-                  const completed = retryResult.user.onboardingCompleted === true;
+                  const serverCompleted = retryResult.user.onboardingCompleted === true;
+                  const localCompleted = localStorage.getItem('onboardingCompleted') === 'true';
+                  const completed = serverCompleted || localCompleted;
                   if (completed) {
                     setOnboardingCompleted(true);
                     localStorage.setItem('onboardingCompleted', 'true');
@@ -292,7 +300,7 @@ const AppContent: React.FC = () => {
                   setAuthData({ user: retryResult.user, organization: retryResult.organization });
                   startIdleTimer();
                   const hasZohoConnected = retryResult.organization.integrations?.zoho?.status === 'connected';
-                  if (!onboardingCompleted && !completed && retryResult.inventoryCount === 0 && !hasZohoConnected) {
+                  if (!completed && retryResult.inventoryCount === 0 && !hasZohoConnected) {
                     setNeedsOnboarding(true);
                   } else {
                     setNeedsOnboarding(false);

@@ -180,19 +180,16 @@ export const getUserData = async (uid: string): Promise<{
         if (userErr) throw userErr;
 
         if (userData) {
-          // Fetch org separately to avoid PostgREST embedded join 500 errors
-          const { data: orgData } = await supabase
-            .from('organizations')
-            .select('*')
-            .eq('id', userData.org_id)
-            .maybeSingle();
+          // Fetch org, settings, and inventory count in parallel
+          const [orgResult, settingsResult, invResult] = await Promise.all([
+            supabase.from('organizations').select('*').eq('id', userData.org_id).maybeSingle(),
+            supabase.from('organization_settings').select('notification_preferences').eq('org_id', userData.org_id).maybeSingle(),
+            supabase.from('inventory_items').select('id', { count: 'exact', head: true }).eq('org_id', userData.org_id).eq('is_active', true),
+          ]);
 
-          const { count: invCount } = await supabase
-            .from('inventory_items')
-            .select('id', { count: 'exact', head: true })
-            .eq('org_id', userData.org_id)
-            .eq('is_active', true)
-            .then(r => ({ count: r.count ?? 0 }));
+          const orgData = orgResult.data;
+          const serverOnboardingDone = settingsResult.data?.notification_preferences?.onboarding_completed === true;
+          const invCount = invResult.count ?? 0;
 
           return {
             user: {
@@ -201,6 +198,7 @@ export const getUserData = async (uid: string): Promise<{
               email: userData.email,
               role: userData.role as UserRole,
               organizationId: userData.org_id,
+              onboardingCompleted: serverOnboardingDone,
             } as User,
             organization: {
               id: orgData?.id ?? userData.org_id,
@@ -209,7 +207,7 @@ export const getUserData = async (uid: string): Promise<{
               integrations: { zoho: { status: 'disconnected' as const } },
               subscription: { plan: (orgData?.plan === 'pro' ? 'Pro' : 'Free') as any, status: 'active' as const }
             } as Organization,
-            inventoryCount: invCount ?? 0,
+            inventoryCount: invCount,
           };
         }
 
@@ -232,12 +230,19 @@ export const getUserData = async (uid: string): Promise<{
 };
 
 /**
- * Mark onboarding as completed for a user
+ * Mark onboarding as completed — persists to Supabase so it survives
+ * browser cache clears, incognito sessions, and device changes.
  */
-export const markOnboardingComplete = async (_organizationId: string, uid: string): Promise<void> => {
+export const markOnboardingComplete = async (organizationId: string, uid: string): Promise<void> => {
   try {
-    // Onboarding state is tracked in localStorage only — no dedicated DB column yet
     localStorage.setItem('onboardingCompleted', 'true');
+    // Persist server-side so localStorage is not the only source of truth
+    await supabase
+      .from('organization_settings')
+      .upsert(
+        { org_id: organizationId, notification_preferences: { onboarding_completed: true } },
+        { onConflict: 'org_id', ignoreDuplicates: false }
+      );
     console.log('✅ Onboarding marked complete for', uid);
   } catch (err) {
     console.warn('⚠️ Failed to mark onboarding complete (non-blocking):', (err as any)?.message);

@@ -434,8 +434,6 @@ export const AppProvider: React.FC<{ children: ReactNode, user: User, organizati
     }, [state.settings, state.currentUser.email, addToast]);
 
     const setupRealtimeListeners = useCallback((orgId: string) => {
-        const channels: RealtimeChannel[] = [];
-
         if (!orgId || orgId === 'undefined') {
             console.error('Invalid organization ID for real-time listeners:', orgId);
             return () => {};
@@ -542,42 +540,37 @@ export const AppProvider: React.FC<{ children: ReactNode, user: User, organizati
             }
         };
 
-        // 1. Inventory channel
-        const invChannel = supabase.channel(`ctx-inventory:${orgId}`)
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'inventory_items', filter: `org_id=eq.${orgId}` },
+        // ── ONE channel, ALL handlers chained before .subscribe() ──────────
+        // Supabase rule: ALL .on() calls MUST come before .subscribe().
+        // Using 5 separate channels caused a race where the effect could re-run
+        // (or React StrictMode could double-invoke it) before cleanup removed the
+        // old channels — the same channel name would be returned already-subscribed
+        // and calling .on() on it threw "cannot add postgres_changes callbacks
+        // after subscribe()".  One merged channel eliminates all of that.
+        const merged = supabase
+            .channel(`ctx:${orgId}`)
+            .on('postgres_changes',
+                { event: '*', schema: 'public', table: 'inventory_items', filter: `org_id=eq.${orgId}` },
                 () => { refreshInventory(); })
-            .subscribe();
-        channels.push(invChannel);
-
-        // 2. Activity logs channel
-        const logsChannel = supabase.channel(`ctx-logs:${orgId}`)
-            .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'activity_logs', filter: `org_id=eq.${orgId}` },
+            .on('postgres_changes',
+                { event: 'INSERT', schema: 'public', table: 'activity_logs', filter: `org_id=eq.${orgId}` },
                 () => { refreshLogs(); })
-            .subscribe();
-        channels.push(logsChannel);
-
-        // 3. Users channel
-        const usersChannel = supabase.channel(`ctx-users:${orgId}`)
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'users', filter: `org_id=eq.${orgId}` },
+            .on('postgres_changes',
+                { event: '*', schema: 'public', table: 'users', filter: `org_id=eq.${orgId}` },
                 () => { refreshUsers(); })
-            .subscribe();
-        channels.push(usersChannel);
-
-        // 4. Approvals channel
-        const approvalsChannel = supabase.channel(`ctx-approvals:${orgId}`)
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'approval_requests', filter: `org_id=eq.${orgId}` },
+            .on('postgres_changes',
+                { event: '*', schema: 'public', table: 'approval_requests', filter: `org_id=eq.${orgId}` },
                 () => { refreshApprovals(); })
-            .subscribe();
-        channels.push(approvalsChannel);
-
-        // 5. Stock take sessions channel
-        const stockTakeChannel = supabase.channel(`ctx-stocktake:${orgId}`)
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'stock_take_sessions', filter: `org_id=eq.${orgId}` },
+            .on('postgres_changes',
+                { event: '*', schema: 'public', table: 'stock_take_sessions', filter: `org_id=eq.${orgId}` },
                 () => { refreshStockTake(); })
-            .subscribe();
-        channels.push(stockTakeChannel);
+            .subscribe((status) => {
+                if (status === 'SUBSCRIBED') {
+                    console.log(`🔔 AppContext Realtime channel active for org ${orgId}`);
+                }
+            });
 
-        // Initial fetch for all listeners
+        // Initial fetch for all data
         refreshInventory();
         refreshLogs();
         refreshUsers();
@@ -585,7 +578,7 @@ export const AppProvider: React.FC<{ children: ReactNode, user: User, organizati
         refreshStockTake();
 
         return () => {
-            channels.forEach(ch => supabase.removeChannel(ch));
+            supabase.removeChannel(merged);
         };
     }, []);
 

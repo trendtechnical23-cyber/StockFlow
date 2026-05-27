@@ -159,9 +159,22 @@ class NotificationService {
       // Initial fetch
       fetchAll();
 
-      // CRITICAL: chain ALL .on() handlers BEFORE .subscribe()
+      // CRITICAL: chain ALL .on() handlers BEFORE .subscribe().
+      // Guard: if Supabase's registry already has a channel with this name
+      // (e.g. from a previous session that wasn't cleaned up), remove it first
+      // so we get a fresh unsubscribed instance.
+      const channelName = `notifications:${key}`;
+      try {
+        // If Supabase's registry already has this channel name in a subscribed state,
+        // remove it so we get a fresh unsubscribed instance.
+        const existing = supabase.channel(channelName);
+        if ((existing as any).state === 'joined' || (existing as any).state === 'joining') {
+          supabase.removeChannel(existing); // fire-and-forget, sync removal from registry
+        }
+      } catch (_) { /* ignore */ }
+
       this.activeChannel = supabase
-        .channel(`notifications:${key}`) // stable name — one channel per key
+        .channel(channelName)
         .on(
           'postgres_changes',
           { event: '*', schema: 'public', table: 'notifications', filter: `org_id=eq.${organizationId}` },
