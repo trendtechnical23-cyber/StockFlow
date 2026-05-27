@@ -20,13 +20,15 @@ export default defineConfig(({ mode }) => {
         'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY)
       },
       resolve: {
-        alias: {
-          '@': path.resolve(__dirname, '.'),
-        }
+        alias: [
+          // Redirect ALL firebase/* imports to our stub so the firebase npm
+          // package is not needed in the bundle.
+          {
+            find: /^firebase(\/.*)?$/,
+            replacement: path.resolve(__dirname, 'services/firebase.ts'),
+          },
+          { find: '@', replacement: path.resolve(__dirname, '.') },
+        ],
       },
-      // Fix for Firebase imports
-      optimizeDeps: {
-        include: ['firebase/app', 'firebase/auth', 'firebase/firestore', 'firebase/storage', 'firebase/analytics']
-      }
     };
 });

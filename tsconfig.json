@@ -19,9 +19,9 @@
     "allowJs": true,
     "jsx": "react-jsx",
     "paths": {
-      "@/*": [
-        "./*"
-      ]
+      "@/*": ["./*"],
+      "firebase": ["./services/firebase.ts"],
+      "firebase/*": ["./services/firebase.ts"]
     },
     "allowImportingTsExtensions": true,
     "noEmit": true

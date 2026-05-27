@@ -1,123 +1,81 @@
 const express = require('express');
 const router = express.Router();
-const admin = require('firebase-admin');
 const crypto = require('crypto');
 const axios = require('axios');
 const { verifyFirebaseToken } = require('../middleware/auth');
+const { supabase } = require('../supabaseAdmin');
 
-const getDb = () => admin.firestore();
-
-// PayFast configuration from environment variables (NO FALLBACKS FOR SECURITY)
-const PAYFAST_MERCHANT_ID = process.env.PAYFAST_MERCHANT_ID;
+// PayFast configuration
+const PAYFAST_MERCHANT_ID  = process.env.PAYFAST_MERCHANT_ID;
 const PAYFAST_MERCHANT_KEY = process.env.PAYFAST_MERCHANT_KEY;
-const PAYFAST_PASSPHRASE = process.env.PAYFAST_PASSPHRASE;
-const PAYFAST_ENV = process.env.PAYFAST_ENV || 'sandbox'; // sandbox or production
+const PAYFAST_PASSPHRASE   = process.env.PAYFAST_PASSPHRASE;
+const PAYFAST_ENV          = process.env.PAYFAST_ENV || 'sandbox';
 
-// Check if PayFast is configured (warn but don't crash server)
 const isPayFastConfigured = !!(PAYFAST_MERCHANT_ID && PAYFAST_MERCHANT_KEY && PAYFAST_PASSPHRASE);
-
 if (!isPayFastConfigured) {
-  console.warn('⚠️  WARNING: PayFast credentials not configured in environment variables');
-  console.warn('   Billing routes will return 503 Service Unavailable until credentials are set');
-  console.warn('   Required: PAYFAST_MERCHANT_ID, PAYFAST_MERCHANT_KEY, PAYFAST_PASSPHRASE');
+  console.warn('⚠️ PayFast credentials not configured — billing routes will return 503 until set');
 }
 
-// PayFast URLs
-const PAYFAST_URL = PAYFAST_ENV === 'production' 
-  ? 'https://www.payfast.co.za/eng/process' 
+const PAYFAST_URL = PAYFAST_ENV === 'production'
+  ? 'https://www.payfast.co.za/eng/process'
   : 'https://sandbox.payfast.co.za/eng/process';
 
-// Middleware to check if PayFast is configured
 const requirePayFast = (req, res, next) => {
   if (!isPayFastConfigured) {
-    return res.status(503).json({
-      error: 'Billing service not configured',
-      message: 'PayFast integration is not available at this time'
-    });
+    return res.status(503).json({ error: 'Billing service not configured', message: 'PayFast integration is not available' });
   }
   next();
 };
 
-/**
- * Generate PayFast Signature
- * @param {Object} data - Form data
- * @param {string} passphrase - Security passphrase
- * @returns {string} MD5 Signature
- */
 const generateSignature = (data, passphrase = '') => {
-  // Sort keys alphabetically
   const keys = Object.keys(data).sort();
-  
-  // Create query string
   let queryString = '';
-  keys.forEach((key, index) => {
+  keys.forEach(key => {
     if (data[key] !== '' && key !== 'signature') {
       queryString += `${key}=${encodeURIComponent(data[key].toString().trim()).replace(/%20/g, '+')}&`;
     }
   });
-
-  // Append passphrase
   if (passphrase) {
     queryString += `passphrase=${encodeURIComponent(passphrase.trim()).replace(/%20/g, '+')}`;
   } else {
-    // Remove trailing & if no passphrase
     queryString = queryString.substring(0, queryString.length - 1);
   }
-
-  // Generate MD5 hash
   return crypto.createHash('md5').update(queryString).digest('hex');
 };
 
 /**
  * POST /api/billing/payfast/create-subscription
- * Generates the form data and signature for PayFast redirect
  */
 router.post('/payfast/create-subscription', requirePayFast, async (req, res) => {
   try {
     const { plan, organizationId, amount, itemName } = req.body;
-    
     if (!plan || !organizationId || !amount) {
       return res.status(400).json({ error: 'Missing required parameters' });
     }
 
-    const host = process.env.PUBLIC_URL || 'https://stockflow-dashboard.web.app';
+    const host = process.env.PUBLIC_URL || 'https://stockflow-dashboard.vercel.app';
     const baseUrl = host.endsWith('/') ? host.slice(0, -1) : host;
-    
-    // PayFast subscription data (Recurring)
+
     const formData = {
-      // Merchant details
       merchant_id: PAYFAST_MERCHANT_ID,
       merchant_key: PAYFAST_MERCHANT_KEY,
-      
-      // Return URLs
       return_url: `${baseUrl}/?view=billing-success`,
       cancel_url: `${baseUrl}/?view=billing-cancel`,
-      notify_url: `${process.env.BACKEND_URL || 'https://api.stockflow.co'}/api/billing/payfast/itn`,
-      
-      // Transaction details
+      notify_url: `${process.env.BACKEND_URL || process.env.RAILWAY_STATIC_URL || ''}/api/billing/payfast/itn`,
       m_payment_id: `SF-${organizationId}-${Date.now()}`,
       amount: parseFloat(amount).toFixed(2),
       item_name: itemName || `StockFlow ${plan} Plan`,
-      
-      // Billing details (Recurring)
-      // 1 = Monthly, 2 = Quarterly, 3 = Biannually, 4 = Annually, 5 = Weekly
-      subscription_type: '1', 
+      subscription_type: '1',
       recurring_amount: parseFloat(amount).toFixed(2),
-      frequency: '3', // Monthly
-      cycles: '0', // 0 = Infinite / Until cancelled
-      
-      // Custom data
+      frequency: '3',
+      cycles: '0',
       custom_str1: organizationId,
-      custom_str2: plan
+      custom_str2: plan,
     };
 
-    // Generate signature
     formData.signature = generateSignature(formData, PAYFAST_PASSPHRASE);
 
-    res.json({
-      formData,
-      actionUrl: PAYFAST_URL
-    });
+    res.json({ formData, actionUrl: PAYFAST_URL });
   } catch (error) {
     console.error('Error creating PayFast subscription:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -126,85 +84,78 @@ router.post('/payfast/create-subscription', requirePayFast, async (req, res) => 
 
 /**
  * POST /api/billing/payfast/itn
- * Instant Transaction Notification (Webhook)
+ * Instant Transaction Notification
  */
 router.post('/payfast/itn', requirePayFast, async (req, res) => {
   try {
     const data = req.body;
-    console.log('Received PayFast ITN:', data);
 
-    // 1. Validate signature FIRST — before any database writes
-    const signature = data.signature;
-    const generated = generateSignature(data, PAYFAST_PASSPHRASE);
-    
+    const signature  = data.signature;
+    const generated  = generateSignature(data, PAYFAST_PASSPHRASE);
     if (signature !== generated) {
       console.error('❌ PayFast ITN: Invalid signature');
       return res.status(400).send('Invalid signature');
     }
 
-    // 2. Validate required fields
-    const organizationId = data.custom_str1;
-    const plan = data.custom_str2;
-    const paymentStatus = data.payment_status;
+    const organizationId  = data.custom_str1;
+    const plan            = data.custom_str2;
+    const paymentStatus   = data.payment_status;
 
     if (!organizationId || !plan) {
-      console.error('❌ PayFast ITN: Missing custom_str1 (orgId) or custom_str2 (plan)');
       return res.status(400).send('Missing required fields');
     }
 
-    // 3. Whitelist valid plans
     const validPlans = ['Free', 'Pro', 'Enterprise'];
     if (!validPlans.includes(plan)) {
-      console.error(`❌ PayFast ITN: Invalid plan "${plan}"`);
       return res.status(400).send('Invalid plan');
     }
 
-    // 4. Check idempotency — prevent duplicate processing of same payment
     const paymentId = data.pf_payment_id;
+
+    // Idempotency check
     if (paymentId) {
-      const existingPayment = await getDb().collection('activities')
-        .where('type', '==', 'billing')
-        .where('details', '==', `Subscription for ${plan} plan successful. Payment ID: ${paymentId}`)
-        .limit(1)
-        .get();
-      
-      if (!existingPayment.empty) {
-        console.log(`⚠️ PayFast ITN: Payment ${paymentId} already processed — skipping`);
+      const { data: existing } = await supabase
+        .from('activity_logs')
+        .select('id')
+        .eq('org_id', organizationId)
+        .eq('type', 'billing')
+        .contains('details', { pf_payment_id: paymentId })
+        .limit(1);
+      if (existing && existing.length > 0) {
+        console.log(`⚠️ Payment ${paymentId} already processed — skipping`);
         return res.status(200).send('OK');
       }
     }
 
-    // 5. Verify organization exists
-    const orgRef = getDb().collection('organizations').doc(organizationId);
-    const orgDoc = await orgRef.get();
-    if (!orgDoc.exists) {
+    // Verify organization exists
+    const { data: org } = await supabase
+      .from('organizations')
+      .select('id')
+      .eq('id', organizationId)
+      .maybeSingle();
+    if (!org) {
       console.error(`❌ PayFast ITN: Organization ${organizationId} not found`);
       return res.status(400).send('Organization not found');
     }
 
-    // 6. Process the payment
     if (paymentStatus === 'COMPLETE') {
-      await orgRef.set({
-        subscription: {
-          plan: plan,
-          status: 'active',
-          paymentId: paymentId,
-          lastPaymentDate: admin.firestore.FieldValue.serverTimestamp(),
-          nextPaymentDate: admin.firestore.FieldValue.serverTimestamp(),
-          provider: 'payfast'
-        }
-      }, { merge: true });
+      await supabase.from('organizations').update({
+        plan,
+        updated_at: new Date().toISOString(),
+      }).eq('id', organizationId);
 
-      await getDb().collection('activities').add({
+      await supabase.from('activity_logs').insert({
+        org_id: organizationId,
         type: 'billing',
-        action: 'subscription_payment',
-        organizationId,
-        details: `Subscription for ${plan} plan successful. Payment ID: ${paymentId}`,
-        timestamp: admin.firestore.FieldValue.serverTimestamp(),
-        performedBy: 'System (PayFast)'
+        details: {
+          plan,
+          pf_payment_id: paymentId,
+          status: 'COMPLETE',
+          performed_by: 'System (PayFast)',
+        },
       });
 
-      console.log(`✅ Subscription updated for org: ${organizationId}`);
+      console.log(`✅ Subscription updated for org: ${organizationId} → ${plan}`);
     }
 
     res.status(200).send('OK');
@@ -220,19 +171,17 @@ router.post('/payfast/itn', requirePayFast, async (req, res) => {
 router.get('/validate/:organizationId', verifyFirebaseToken, async (req, res) => {
   try {
     const { organizationId } = req.params;
-    const orgDoc = await getDb().collection('organizations').doc(organizationId).get();
+    const { data: org, error } = await supabase
+      .from('organizations')
+      .select('id, plan')
+      .eq('id', organizationId)
+      .maybeSingle();
 
-    if (!orgDoc.exists) {
+    if (error || !org) {
       return res.status(404).json({ error: 'Organization not found' });
     }
 
-    const data = orgDoc.data();
-    const subscription = data.subscription || { plan: 'Free', status: 'active' };
-
-    // Check if plan is active and not expired
-    const isValid = subscription.status === 'active';
-
-    res.json({ isValid, plan: subscription.plan });
+    res.json({ isValid: true, plan: org.plan || 'free' });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -244,15 +193,10 @@ router.get('/validate/:organizationId', verifyFirebaseToken, async (req, res) =>
 router.post('/cancel-subscription', verifyFirebaseToken, requirePayFast, async (req, res) => {
   try {
     const { organizationId } = req.body;
-    
-    // In a real PayFast setup, you might call their API to cancel recurring billing
-    // For this implementation, we mark it as cancelling in our DB
-    
-    await getDb().collection('organizations').doc(organizationId).update({
-      'subscription.status': 'cancelling',
-      'subscription.updatedAt': admin.firestore.FieldValue.serverTimestamp()
-    });
-
+    await supabase
+      .from('organizations')
+      .update({ plan: 'free', updated_at: new Date().toISOString() })
+      .eq('id', organizationId);
     res.json({ success: true, message: 'Subscription cancellation scheduled' });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -265,19 +209,16 @@ router.post('/cancel-subscription', verifyFirebaseToken, requirePayFast, async (
 router.get('/history/:organizationId', verifyFirebaseToken, requirePayFast, async (req, res) => {
   try {
     const { organizationId } = req.params;
-    const activities = await getDb().collection('activities')
-      .where('organizationId', '==', organizationId)
-      .where('type', '==', 'billing')
-      .orderBy('timestamp', 'desc')
-      .limit(10)
-      .get();
+    const { data: history, error } = await supabase
+      .from('activity_logs')
+      .select('*')
+      .eq('org_id', organizationId)
+      .eq('type', 'billing')
+      .order('created_at', { ascending: false })
+      .limit(10);
 
-    const history = activities.docs.map(doc => ({
-      id: doc.id,
-      ...doc.data()
-    }));
-
-    res.json(history);
+    if (error) throw error;
+    res.json(history || []);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

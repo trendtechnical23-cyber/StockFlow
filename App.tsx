@@ -17,7 +17,7 @@ import { supabase, signOut as supabaseSignOut } from './services/supabase';
 import type { User as SupabaseUser } from '@supabase/supabase-js';
 // Import user invite helper for console access
 import './utils/userInviteHelper';
-// Import FCM messaging
+// Push notification stubs (no-ops while FCM is unconfigured)
 import { initializeMessaging, requestFCMPermission } from './firebaseMessaging';
 
 interface AuthData {
@@ -39,7 +39,7 @@ const Spinner: React.FC<{ message?: string }> = ({ message }) => (
 
 const AppContent: React.FC = () => {
   const [authData, setAuthData] = useState<AuthData | null>(null);
-  const [firebaseUser, setFirebaseUser] = useState<SupabaseUser | null>(null);
+  const [currentUser, setCurrentUser] = useState<SupabaseUser | null>(null); // Supabase auth user
   const [needsOnboarding, setNeedsOnboarding] = useState(false);
   const [onboardingCompleted, setOnboardingCompleted] = useState(() => {
     // Check localStorage for persistent onboarding state
@@ -103,7 +103,7 @@ const AppContent: React.FC = () => {
 
   // Handle idle timeout - show warning modal
   const handleIdle = useCallback(() => {
-    if (firebaseUser && authData) {
+    if (currentUser && authData) {
       console.log('🕒 User idle detected, showing warning modal');
       setIsUserActive(false);
       setShowIdleWarning(true);
@@ -131,7 +131,7 @@ const AppContent: React.FC = () => {
       (window as any)._idleCountdownInterval = countdownInterval;
       (window as any)._idleAutoLogoutTimeout = autoLogoutTimeout;
     }
-  }, [firebaseUser, authData, forceLogout]);
+  }, [currentUser, authData, forceLogout]);
 
   // Handle user becoming active again
   const handleActive = useCallback(() => {
@@ -206,7 +206,7 @@ const AppContent: React.FC = () => {
       }
 
       isLoadingUserDataRef.current = true;
-      setFirebaseUser(user);
+      setCurrentUser(user);
       // Only show fullscreen spinner on first load — background refreshes are silent
       if (!authData) {
         setIsLoading(true);
@@ -317,7 +317,7 @@ const AppContent: React.FC = () => {
         console.warn('🔑 Stale refresh token — clearing local auth storage');
         supabase.auth.signOut({ scope: 'local' });
         loadedUserIdRef.current = null;
-        setFirebaseUser(null);
+        setCurrentUser(null);
         setAuthData(null);
         setIsLoading(false);
         return;
@@ -345,7 +345,7 @@ const AppContent: React.FC = () => {
       if (event === 'INITIAL_SESSION') return; // handled above
 
       if (event === 'TOKEN_REFRESHED') {
-        setFirebaseUser(session?.user ?? null); // silent sync
+        setCurrentUser(session?.user ?? null); // silent sync
         return;
       }
 
@@ -370,7 +370,7 @@ const AppContent: React.FC = () => {
         }
         console.log('🚪 User signed out');
         loadedUserIdRef.current = null;
-        setFirebaseUser(null);
+        setCurrentUser(null);
         setAuthData(null);
         setNeedsOnboarding(false);
         setLoadingMessage('Initializing...');
@@ -390,16 +390,16 @@ const AppContent: React.FC = () => {
     setNeedsOnboarding(false);
     setOnboardingCompleted(true);
     localStorage.setItem('onboardingCompleted', 'true');
-    if (firebaseUser) {
-      localStorage.setItem('onboardingUid', firebaseUser.id);
+    if (currentUser) {
+      localStorage.setItem('onboardingUid', currentUser.id);
       if (authData) {
-        await api.markOnboardingComplete(authData.organization.id, firebaseUser.id);
+        await api.markOnboardingComplete(authData.organization.id, currentUser.id);
       }
     }
     // Clear any saved view and navigate to Dashboard for new users
     localStorage.removeItem('currentView');
     addToast({ message: 'Setup complete! You can now add your first item.', type: 'info' });
-  }, [addToast, firebaseUser, authData]);
+  }, [addToast, currentUser, authData]);
   
   const handleImportFromZoho = useCallback(async () => {
     if (!authData) return;
@@ -421,8 +421,8 @@ const AppContent: React.FC = () => {
       setNeedsOnboarding(false);
       setOnboardingCompleted(true);
       localStorage.setItem('onboardingCompleted', 'true');
-      if (authData && firebaseUser) {
-        await api.markOnboardingComplete(authData.organization.id, firebaseUser.id);
+      if (authData && currentUser) {
+        await api.markOnboardingComplete(authData.organization.id, currentUser.id);
       }
       addToast({ message: 'Successfully imported items from Zoho!', type: 'success' });
     } catch (err: any) {
@@ -434,11 +434,11 @@ const AppContent: React.FC = () => {
   }, [authData, addToast]);
 
   const handleZohoConnectFromOnboarding = useCallback(async () => {
-    if (!authData || !firebaseUser) return;
+    if (!authData || !currentUser) return;
     try {
       const { data: { session } } = await supabase.auth.getSession();
       const token = session?.access_token;
-      const response = await fetch(API_ENDPOINTS.zohoAuthUrl(authData.organization.id, firebaseUser.id), {
+      const response = await fetch(API_ENDPOINTS.zohoAuthUrl(authData.organization.id, currentUser.id), {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
       const data = await response.json();
@@ -448,15 +448,15 @@ const AppContent: React.FC = () => {
     } catch (err: any) {
       addToast({ message: err.message || 'Failed to connect to Zoho', type: 'error' });
     }
-  }, [authData, firebaseUser, addToast]);
+  }, [authData, currentUser, addToast]);
 
   // Navigation handlers for onboarding - navigate to main app with specific view
   const handleGoogleSheetsImport = useCallback(() => {
     setNeedsOnboarding(false);
     setOnboardingCompleted(true);
     localStorage.setItem('onboardingCompleted', 'true');
-    if (authData && firebaseUser) {
-      api.markOnboardingComplete(authData.organization.id, firebaseUser.id);
+    if (authData && currentUser) {
+      api.markOnboardingComplete(authData.organization.id, currentUser.id);
     }
     // Store the intended view in localStorage so MainLayout can pick it up
     localStorage.setItem('pendingView', 'integrations');
@@ -466,8 +466,8 @@ const AppContent: React.FC = () => {
     setNeedsOnboarding(false);
     setOnboardingCompleted(true);
     localStorage.setItem('onboardingCompleted', 'true');
-    if (authData && firebaseUser) {
-      api.markOnboardingComplete(authData.organization.id, firebaseUser.id);
+    if (authData && currentUser) {
+      api.markOnboardingComplete(authData.organization.id, currentUser.id);
     }
     // Store the intended view in localStorage so MainLayout can pick it up
     localStorage.setItem('pendingView', 'integrations');
@@ -477,11 +477,11 @@ const AppContent: React.FC = () => {
     setNeedsOnboarding(false);
     setOnboardingCompleted(true);
     localStorage.setItem('onboardingCompleted', 'true');
-    if (authData && firebaseUser) {
-      api.markOnboardingComplete(authData.organization.id, firebaseUser.id);
+    if (authData && currentUser) {
+      api.markOnboardingComplete(authData.organization.id, currentUser.id);
     }
     localStorage.setItem('pendingView', 'integrations');
-  }, [authData, firebaseUser]);
+  }, [authData, currentUser]);
 
   const handleLogout = useCallback(async () => {
     console.log('👋 Manual logout initiated');
@@ -493,7 +493,7 @@ const AppContent: React.FC = () => {
 
   // Start/stop idle timer based on authentication state  
   useEffect(() => {
-    if (firebaseUser && authData && !needsOnboarding && !isLoading) {
+    if (currentUser && authData && !needsOnboarding && !isLoading) {
       if (!idleTimerStartedRef.current) {
         console.log('▶️ Starting idle timer for authenticated user');
         startIdleTimer();
@@ -520,7 +520,7 @@ const AppContent: React.FC = () => {
       setShowIdleWarning(false);
       setIsUserActive(true);
     }
-  }, [firebaseUser, authData, needsOnboarding, isLoading, startIdleTimer, stopIdleTimer, addToast]);
+  }, [currentUser, authData, needsOnboarding, isLoading, startIdleTimer, stopIdleTimer, addToast]);
 
   // Cleanup idle timer on unmount
   useEffect(() => {
@@ -540,7 +540,7 @@ const AppContent: React.FC = () => {
       return <Spinner message={loadingMessage} />;
     }
     
-    if (!firebaseUser || !authData) {
+    if (!currentUser || !authData) {
       return <LoginPage />;
     }
     

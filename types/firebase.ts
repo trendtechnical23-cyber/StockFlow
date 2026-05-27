@@ -1,18 +1,15 @@
-// Firebase Backend Type Definitions - Production Architecture
-// Auto-generated from Firestore data model
+// Supabase-compatible type definitions — replaces the old Firebase type file.
+// Timestamps are ISO strings (Supabase returns strings, not Firebase Timestamp objects).
 
-import { Timestamp } from 'firebase/firestore';
+export type ISOTimestamp = string;
 
-// ========================================================================
-// GLOBAL COLLECTIONS (NOT PER ORG)
-// ========================================================================
-
+// ── Users / Auth ──────────────────────────────────────────────────────────────
 export interface User {
   email: string;
   displayName: string;
   photoURL?: string;
-  createdAt: Timestamp;
-  lastLoginAt: Timestamp;
+  createdAt: ISOTimestamp;
+  lastLoginAt: ISOTimestamp;
 }
 
 export interface Device {
@@ -20,7 +17,7 @@ export interface Device {
   fcmToken: string;
   platform: 'android' | 'web';
   appVersion: string;
-  lastActiveAt: Timestamp;
+  lastActiveAt: ISOTimestamp;
 }
 
 export interface UserIndex {
@@ -35,14 +32,11 @@ export interface UserEmailIndex {
   organizationId: string;
 }
 
-// ========================================================================
-// ORGANIZATION COLLECTIONS
-// ========================================================================
-
+// ── Organization ──────────────────────────────────────────────────────────────
 export interface Organization {
   name: string;
   plan: 'free' | 'pro' | 'enterprise';
-  createdAt: Timestamp;
+  createdAt: ISOTimestamp;
   ownerId: string;
   settings: {
     lowStockThreshold: number;
@@ -54,20 +48,21 @@ export interface Organization {
 export interface OrgMember {
   role: 'owner' | 'manager' | 'staff';
   active: boolean;
-  createdAt: Timestamp;
+  createdAt: ISOTimestamp;
   invitedBy: string;
-  lastActiveAt: Timestamp;
+  lastActiveAt: ISOTimestamp;
 }
 
+// ── Inventory ─────────────────────────────────────────────────────────────────
 export interface InventoryItem {
   sku: string;
   name: string;
   category: string;
   quantity: number;
-  lastUsedAt: Timestamp;
-  lastModifiedAt: Timestamp;
+  lastUsedAt: ISOTimestamp;
+  lastModifiedAt: ISOTimestamp;
   isActive: boolean;
-  priority: boolean; // daily movers
+  priority: boolean;
   source: 'manual' | 'zoho' | 'pos';
   organizationId: string;
   createdBy: string;
@@ -81,21 +76,22 @@ export interface InventoryItem {
 export interface InventoryStats {
   monthlyMoves: number;
   yearlyMoves: number;
-  dormantScore: number; // 0-100, higher = more dormant
-  lastCalculated: Timestamp;
+  dormantScore: number;
+  lastCalculated: ISOTimestamp;
   organizationId: string;
 }
 
+// ── Stock Take ────────────────────────────────────────────────────────────────
 export interface StockTakeSession {
   status: 'open' | 'closed' | 'approved';
   startedBy: string;
-  startedAt: Timestamp;
-  closedAt?: Timestamp;
+  startedAt: ISOTimestamp;
+  closedAt?: ISOTimestamp;
   approvedBy?: string;
-  approvedAt?: Timestamp;
+  approvedAt?: ISOTimestamp;
   organizationId: string;
   description?: string;
-  itemCount: number; // total items scanned
+  itemCount: number;
 }
 
 export interface StockTakeEntry {
@@ -103,31 +99,33 @@ export interface StockTakeEntry {
   itemId: string;
   countedQty: number;
   scannedBy: string;
-  scannedAt: Timestamp;
+  scannedAt: ISOTimestamp;
   organizationId: string;
   notes?: string;
 }
 
+// ── Approvals ─────────────────────────────────────────────────────────────────
 export interface ApprovalRequest {
   type: 'stock_adjustment' | 'zoho_write' | 'bulk_import';
   itemId: string;
-  delta: number; // quantity change
+  delta: number;
   reason: string;
   requestedBy: string;
   status: 'pending' | 'approved' | 'rejected';
   approvedBy?: string;
-  approvedAt?: Timestamp;
-  createdAt: Timestamp;
+  approvedAt?: ISOTimestamp;
+  createdAt: ISOTimestamp;
   organizationId: string;
-  metadata?: any; // type-specific data
+  metadata?: any;
 }
 
+// ── Activity Logs ─────────────────────────────────────────────────────────────
 export interface ActivityLog {
   type: 'scan' | 'approval' | 'sync' | 'login' | 'invite';
   entityType: 'inventory' | 'user' | 'session' | 'organization';
   entityId: string;
   actorId: string;
-  createdAt: Timestamp;
+  createdAt: ISOTimestamp;
   organizationId: string;
   details: {
     before?: any;
@@ -137,12 +135,13 @@ export interface ActivityLog {
   };
 }
 
+// ── Notifications ─────────────────────────────────────────────────────────────
 export interface Notification {
-  targetUserId: string | 'ALL'; // 'ALL' for org-wide notifications
+  targetUserId: string | 'ALL';
   title: string;
   body: string;
   read: boolean;
-  createdAt: Timestamp;
+  createdAt: ISOTimestamp;
   organizationId: string;
   type: 'approval' | 'low_stock' | 'stock_take' | 'system';
   actionUrl?: string;
@@ -153,34 +152,19 @@ export interface OrgSetting {
   key: string;
   value: any;
   updatedBy: string;
-  updatedAt: Timestamp;
+  updatedAt: ISOTimestamp;
   organizationId: string;
 }
 
-// ========================================================================
-// RTDB SIGNALS (OPTIONAL)
-// ========================================================================
-
-export interface Signal {
-  lastEventAt: number; // timestamp
-  type?: string; // event type hint
-}
-
-// ========================================================================
-// HELPER TYPES
-// ========================================================================
-
-export type UserRole = 'owner' | 'manager' | 'staff';
+// ── Scalar helpers ────────────────────────────────────────────────────────────
+export type UserRole       = 'owner' | 'manager' | 'staff';
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected';
-export type SessionStatus = 'open' | 'closed' | 'approved';
+export type SessionStatus  = 'open' | 'closed' | 'approved';
 export type NotificationType = 'approval' | 'low_stock' | 'stock_take' | 'system';
-export type ActivityType = 'scan' | 'approval' | 'sync' | 'login' | 'invite';
-export type EntityType = 'inventory' | 'user' | 'session' | 'organization';
+export type ActivityType   = 'scan' | 'approval' | 'sync' | 'login' | 'invite';
+export type EntityType     = 'inventory' | 'user' | 'session' | 'organization';
 
-// ========================================================================
-// QUERY RESULT TYPES
-// ========================================================================
-
+// ── Composed types ────────────────────────────────────────────────────────────
 export interface InventoryWithStats extends InventoryItem {
   stats?: InventoryStats;
 }
@@ -194,10 +178,7 @@ export interface ActivityLogWithDetails extends ActivityLog {
   entityName?: string;
 }
 
-// ========================================================================
-// API RESPONSE TYPES
-// ========================================================================
-
+// ── API responses ─────────────────────────────────────────────────────────────
 export interface DashboardData {
   inventory: InventoryItem[];
   priorityItems: InventoryItem[];
@@ -223,10 +204,7 @@ export interface StockTakeData {
   };
 }
 
-// ========================================================================
-// FORM TYPES
-// ========================================================================
-
+// ── Forms ─────────────────────────────────────────────────────────────────────
 export interface CreateInventoryItemForm {
   sku: string;
   name: string;
@@ -250,11 +228,8 @@ export interface InviteUserForm {
   displayName?: string;
 }
 
-// ========================================================================
-// ERROR TYPES
-// ========================================================================
-
-export interface FirebaseError extends Error {
+// ── Errors ────────────────────────────────────────────────────────────────────
+export interface AppError extends Error {
   code: string;
   details?: any;
 }
@@ -263,3 +238,6 @@ export interface ValidationError extends Error {
   field: string;
   code: 'required' | 'invalid' | 'duplicate' | 'permission_denied';
 }
+
+/** @deprecated Renamed to AppError — Firebase has been removed */
+export type FirebaseError = AppError;

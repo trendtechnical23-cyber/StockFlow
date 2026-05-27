@@ -1,11 +1,11 @@
-// Import new Firebase types
+// Shared type definitions (no Firebase dependencies)
 export * from './types/firebase';
-import type { 
-  Organization as FirebaseOrganization,
-  InventoryItem as FirebaseInventoryItem,
-  ActivityLog as FirebaseActivityLog,
+import type {
+  Organization as _Organization,
+  InventoryItem as _InventoryItem,
+  ActivityLog as _ActivityLog,
   OrgMember,
-  UserRole as FirebaseUserRole
+  UserRole as _UserRole
 } from './types/firebase';
 
 // Enums - Updated to match new architecture
