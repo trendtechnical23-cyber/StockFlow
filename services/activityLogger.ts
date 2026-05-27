@@ -1,5 +1,4 @@
 import { supabase } from './supabase';
-import { addLogAPI } from './apiService';
 
 /** Resolve the currently authenticated Supabase user (cached per call). */
 const getCurrentUser = async () => {
@@ -79,7 +78,23 @@ class ActivityLogger {
         }
       };
 
-      await addLogAPI(logEntry, organizationId);
+      // Write directly to Supabase (avoids circular import with apiService)
+      await supabase.from('activity_logs').insert({
+        org_id: organizationId,
+        type: logEntry.action,
+        entity_type: logEntry.targetType ?? null,
+        entity_id: null,
+        actor_id: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(currentUser.uid) ? currentUser.uid : null,
+        details: {
+          description: logEntry.description,
+          severity: logEntry.severity,
+          category: logEntry.category,
+          targetName: logEntry.targetName,
+          previousValue: logEntry.previousValue,
+          newValue: logEntry.newValue,
+          metadata: logEntry.metadata,
+        },
+      });
       console.log('📋 Activity logged:', data.action);
       
       // Broadcast notification for APK integration
@@ -250,11 +265,11 @@ class ActivityLogger {
    */
   async createTestAPKLog(organizationId: string) {
     try {
-      await addLogAPI({
-        action: 'Stock Out: Repair - Removed 1 units',
-        user: 'John Smith',
-        details: { itemId: 'item_repair_001', itemName: 'Repair Kit', quantity: -1, source: 'apk' },
-      } as any, organizationId);
+      await supabase.from('activity_logs').insert({
+        org_id: organizationId,
+        type: 'Stock Out: Repair - Removed 1 units',
+        details: { itemName: 'Repair Kit', quantity: -1, source: 'apk' },
+      });
       console.log('📱 Test APK log created successfully');
     } catch (error) {
       console.error('❌ Failed to create test APK log:', error);

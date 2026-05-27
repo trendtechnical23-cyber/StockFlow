@@ -3,12 +3,12 @@
  * Talks to the backend /api/pos/* endpoints.
  */
 
-import { auth } from './firebase';
+import { getAccessToken } from './supabase';
 import { API_ENDPOINTS } from '../utils/apiConfig';
 import type { PosProvider } from '../types';
 
 async function getAuthHeaders(): Promise<Record<string, string>> {
-  const token = await auth.currentUser?.getIdToken();
+  const token = await getAccessToken();
   if (!token) throw new Error('Not authenticated');
   return {
     'Content-Type': 'application/json',

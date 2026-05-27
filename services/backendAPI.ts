@@ -1,6 +1,6 @@
 // New HTTP API Service for Express Backend Integration
 import { InventoryItem, ActivityLogEntry } from '../types';
-import { auth } from './firebase';
+import { getAccessToken } from './supabase';
 import { API_BASE_URL as DETECTED_API_BASE_URL } from '../utils/apiConfig';
 
 // Backend API Configuration
@@ -8,14 +8,14 @@ import { API_BASE_URL as DETECTED_API_BASE_URL } from '../utils/apiConfig';
 const API_BASE_URL = `${DETECTED_API_BASE_URL}/api`;
 
 /**
- * Get Firebase ID token for authentication
+ * Get Supabase access token for authentication
  */
 const getAuthToken = async (): Promise<string> => {
-  const user = auth.currentUser;
-  if (!user) {
+  const token = await getAccessToken();
+  if (!token) {
     throw new Error('User not authenticated');
   }
-  return await user.getIdToken();
+  return token;
 };
 
 /**

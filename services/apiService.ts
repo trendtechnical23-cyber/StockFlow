@@ -7,7 +7,7 @@ import { broadcastActivity } from '../serverBroadcast';
 import { MOCK_ZOHO_IMPORT } from '../constants';
 import { ZohoService } from './zohoService';
 import { API_ENDPOINTS } from '../utils/apiConfig';
-import { supabase, OrganizationDataService, serverTimestamp } from './supabase';
+import { supabase, OrganizationDataService, serverTimestamp, getAccessToken } from './supabase';
 
 // --- ORGANIZATION-CENTRIC API SERVICE (Supabase) ---
 // All data is scoped to organizations for complete data isolation
@@ -704,7 +704,7 @@ export const removeUserFromOrganization = async (userId: string, organizationId:
     // Delete user from Firebase Auth (skip temp users)
     if (!userId.startsWith('temp_')) {
       try {
-        const token = await auth.currentUser?.getIdToken();
+        const token = await getAccessToken();
         if (token) {
           await fetch(API_ENDPOINTS.createUser.replace('/createUser', '/deleteUser'), {
             method: 'DELETE',
@@ -1133,7 +1133,7 @@ export const getZohoItems = async (organizationId: string): Promise<any[]> => {
   try {
     console.log('📥 Fetching Zoho items from backend for org:', organizationId);
     
-    const token = await auth.currentUser?.getIdToken();
+    const token = await getAccessToken();
     if (!token) throw new Error('Not authenticated');
 
     // Call the backend API to get items using stored tokens
@@ -1171,7 +1171,7 @@ export const syncInvoiceUsage = async (organizationId: string): Promise<{ itemsU
   try {
     console.log('🧾 Syncing invoice usage data for org:', organizationId);
     
-    const token = await auth.currentUser?.getIdToken();
+    const token = await getAccessToken();
     if (!token) throw new Error('Not authenticated');
 
     const response = await fetch(API_ENDPOINTS.zohoSyncInvoices, {
@@ -2489,7 +2489,7 @@ export const approveZohoSync = async (
       if (zohoConnected) {
         // BLOCKING path: send to Zoho first; local stock only updates on success.
         const processUrl = API_ENDPOINTS.zohoProcessApproval(organizationId, approvalId);
-        const zohoToken = await auth.currentUser?.getIdToken();
+        const zohoToken = await getAccessToken();
         const processRes = await fetch(processUrl, {
           method: 'POST',
           headers: {
@@ -2519,7 +2519,7 @@ export const approveZohoSync = async (
         // Non-blocking path: Zoho not connected, attempt sync silently but don't gate on it.
         try {
           const processUrl = API_ENDPOINTS.zohoProcessApproval(organizationId, approvalId);
-          const zohoToken = await auth.currentUser?.getIdToken();
+          const zohoToken = await getAccessToken();
           const processRes = await fetch(processUrl, {
             method: 'POST',
             headers: {
@@ -2661,7 +2661,7 @@ export const pullQuantitiesFromZoho = async (
   organizationId: string,
   skus: string[] = []
 ): Promise<{ updated: number; changes: Array<{ sku: string; itemName: string; previousStock: number; newStock: number }> }> => {
-  const token = await auth.currentUser?.getIdToken();
+  const token = await getAccessToken();
   const res = await fetch(API_ENDPOINTS.zohoPullQuantities(organizationId), {
     method: 'POST',
     headers: {

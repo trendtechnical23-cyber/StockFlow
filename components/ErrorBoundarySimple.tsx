@@ -1,5 +1,4 @@
 import React from 'react';
-import { centralizedErrorService } from '../services';
 
 interface ErrorBoundaryProps {
   children: React.ReactNode;
@@ -30,21 +29,8 @@ class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundarySta
   }
 
   componentDidCatch(error: Error, errorInfo: React.ErrorInfo): void {
-    console.error('Error caught by boundary:', error, errorInfo);
-    
-    // Report to centralized error service
-    centralizedErrorService.handleError(error, {
-      severity: 'high',
-      context: {
-        component: 'ErrorBoundary',
-        errorInfo: errorInfo.componentStack
-      }
-    });
-    
-    this.setState({
-      hasError: true,
-      error
-    });
+    console.error('🔴 Error caught by boundary:', error, errorInfo);
+    this.setState({ hasError: true, error });
   }
 
   handleReset = (): void => {
@@ -82,15 +68,17 @@ class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundarySta
             Try Again
           </button>
           
-          {process.env.NODE_ENV === 'development' && this.state.error && (
-            <details style={{ marginTop: '15px', textAlign: 'left' }}>
-              <summary style={{ cursor: 'pointer' }}>Error Details</summary>
-              <pre style={{ 
-                background: '#f8f9fa', 
-                padding: '8px', 
-                overflow: 'auto', 
+          {this.state.error && (
+            <details style={{ marginTop: '15px', textAlign: 'left' }} open>
+              <summary style={{ cursor: 'pointer', color: '#888', fontSize: '12px' }}>Error details</summary>
+              <pre style={{
+                background: '#f8f9fa',
+                padding: '8px',
+                overflow: 'auto',
                 fontSize: '11px',
-                marginTop: '5px'
+                marginTop: '5px',
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-all'
               }}>
                 {this.state.error.toString()}
               </pre>
