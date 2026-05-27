@@ -7,11 +7,8 @@
  * the user metadata set at sign-up / invite time).
  */
 const { createClient } = require('@supabase/supabase-js');
-const ws = require('ws');
 
 // Lazy verifier client — only created on first request, not at require() time.
-// Node.js < 22 has no native WebSocket — pass the ws package so createClient
-// does not throw "Node.js 20 detected without native WebSocket support".
 let _verifier = null;
 function getVerifier() {
   if (_verifier) return _verifier;
@@ -19,8 +16,7 @@ function getVerifier() {
   const key = process.env.SUPABASE_ANON_KEY;
   if (!url || !key) throw new Error('Missing SUPABASE_URL or SUPABASE_ANON_KEY env vars');
   _verifier = createClient(url, key, {
-    auth:     { autoRefreshToken: false, persistSession: false },
-    realtime: { transport: ws },
+    auth: { autoRefreshToken: false, persistSession: false },
   });
   return _verifier;
 }
