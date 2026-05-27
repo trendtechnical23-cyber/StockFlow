@@ -14,6 +14,7 @@
  *   SUPABASE_SERVICE_ROLE_KEY = eyJ...  (secret — never expose to frontend)
  */
 const { createClient } = require('@supabase/supabase-js');
+const ws = require('ws');
 
 let _client = null;
 
@@ -31,8 +32,11 @@ function getClient() {
     );
   }
 
+  // Node.js < 22 has no native WebSocket — pass the ws package so the
+  // Supabase client does not throw "Node.js 20 detected without native WebSocket".
   _client = createClient(url, key, {
-    auth: { autoRefreshToken: false, persistSession: false },
+    auth:     { autoRefreshToken: false, persistSession: false },
+    realtime: { transport: ws },
   });
 
   console.log('[SUPABASE ADMIN] Client initialized ✅');
