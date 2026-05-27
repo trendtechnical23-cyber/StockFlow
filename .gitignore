@@ -36,6 +36,9 @@ APK/.gradle/
 APK/.kotlin/errors/
 APK/local.properties
 
+# Firebase emulator / build artifacts
+.firebase/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
