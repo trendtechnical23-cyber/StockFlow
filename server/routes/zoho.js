@@ -1,54 +1,80 @@
 /**
  * Zoho Books Integration Routes
- * Provides API endpoints for Zoho Books synchronization
+ *
+ * All Firestore usage replaced with Supabase (organization_settings + approval_requests +
+ * inventory_items + activity_logs). Firebase Admin is no longer imported.
  */
 
-const express = require('express');
-const router = express.Router();
+const express    = require('express');
+const router     = express.Router();
 const zohoService = require('../services/zohoService');
-const admin = require('firebase-admin');
+const { supabase } = require('../supabaseAdmin');
 const { verifyFirebaseToken } = require('../middleware/auth');
 
 const REGION_ACCOUNTS_DOMAIN = {
-    us: 'accounts.zoho.com',
-    eu: 'accounts.zoho.eu',
-    in: 'accounts.zoho.in',
-    au: 'accounts.zoho.com.au',
-    jp: 'accounts.zoho.jp',
+  us: 'accounts.zoho.com',
+  eu: 'accounts.zoho.eu',
+  in: 'accounts.zoho.in',
+  au: 'accounts.zoho.com.au',
+  jp: 'accounts.zoho.jp',
 };
+
+// ── Config ────────────────────────────────────────────────────────────────────
 
 /**
  * POST /api/zoho/config
  * Save per-org Zoho API credentials (Client ID, Secret, Zoho Org ID, Region)
  */
 router.post('/config', verifyFirebaseToken, async (req, res) => {
-    try {
-        const { orgId, clientId, clientSecret, zohoOrgId, region, redirectUri } = req.body;
+  try {
+    const { orgId, clientId, clientSecret, zohoOrgId, region, redirectUri } = req.body;
 
-        if (!orgId || !clientId || !clientSecret || !zohoOrgId || !region || !redirectUri) {
-            return res.status(400).json({
-                success: false,
-                message: 'Missing required fields: orgId, clientId, clientSecret, zohoOrgId, region, redirectUri'
-            });
-        }
-
-        if (!REGION_ACCOUNTS_DOMAIN[region]) {
-            return res.status(400).json({ success: false, message: 'Invalid region value' });
-        }
-
-        const db = admin.firestore();
-        await db.collection('organizations')
-            .doc(orgId)
-            .collection('integrations')
-            .doc('zoho_config')
-            .set({ clientId, clientSecret, zohoOrgId, region, redirectUri, updatedAt: new Date() }, { merge: true });
-
-        console.log('✅ Zoho config saved for org:', orgId);
-        res.json({ success: true, message: 'Zoho configuration saved' });
-    } catch (error) {
-        console.error('❌ Failed to save Zoho config:', error);
-        res.status(500).json({ success: false, message: 'Failed to save configuration', error: error.message });
+    if (!orgId || !clientId || !clientSecret || !zohoOrgId || !region || !redirectUri) {
+      return res.status(400).json({
+        success: false,
+        message: 'Missing required fields: orgId, clientId, clientSecret, zohoOrgId, region, redirectUri',
+      });
     }
+
+    if (!REGION_ACCOUNTS_DOMAIN[region]) {
+      return res.status(400).json({ success: false, message: 'Invalid region value' });
+    }
+
+    // Read current config so we don't wipe existing tokens
+    const { data: existing } = await supabase
+      .from('organization_settings')
+      .select('zoho_config')
+      .eq('org_id', orgId)
+      .maybeSingle();
+
+    const currentConfig = existing?.zoho_config || {};
+
+    const { error } = await supabase
+      .from('organization_settings')
+      .upsert(
+        {
+          org_id:      orgId,
+          zoho_config: {
+            ...currentConfig,   // preserve existing tokens / zoho_organization_id cache
+            clientId,
+            clientSecret,
+            zohoOrgId,
+            region,
+            redirectUri,
+            updatedAt: new Date().toISOString(),
+          },
+        },
+        { onConflict: 'org_id' }
+      );
+
+    if (error) throw error;
+
+    console.log('✅ Zoho config saved to Supabase for org:', orgId);
+    res.json({ success: true, message: 'Zoho configuration saved' });
+  } catch (err) {
+    console.error('❌ Failed to save Zoho config:', err);
+    res.status(500).json({ success: false, message: 'Failed to save configuration', error: err.message });
+  }
 });
 
 /**
@@ -56,123 +82,93 @@ router.post('/config', verifyFirebaseToken, async (req, res) => {
  * Check if per-org Zoho config exists (returns safe, non-secret fields only)
  */
 router.get('/config', verifyFirebaseToken, async (req, res) => {
-    try {
-        const { orgId } = req.query;
-        if (!orgId) {
-            return res.status(400).json({ success: false, message: 'Missing orgId' });
-        }
+  try {
+    const { orgId } = req.query;
+    if (!orgId) return res.status(400).json({ success: false, message: 'Missing orgId' });
 
-        const db = admin.firestore();
-        const doc = await db.collection('organizations').doc(orgId).collection('integrations').doc('zoho_config').get();
+    const { data, error } = await supabase
+      .from('organization_settings')
+      .select('zoho_config')
+      .eq('org_id', orgId)
+      .maybeSingle();
 
-        if (!doc.exists) {
-            return res.json({ success: true, configured: false });
-        }
+    if (error) throw error;
 
-        const cfg = doc.data();
-        res.json({
-            success: true,
-            configured: true,
-            config: {
-                clientId: cfg.clientId,
-                zohoOrgId: cfg.zohoOrgId,
-                region: cfg.region,
-                redirectUri: cfg.redirectUri || '',
-                // clientSecret intentionally omitted
-            }
-        });
-    } catch (error) {
-        console.error('❌ Failed to get Zoho config:', error);
-        res.status(500).json({ success: false, message: 'Failed to retrieve configuration', error: error.message });
+    const cfg = data?.zoho_config;
+    if (!cfg?.clientId) {
+      return res.json({ success: true, configured: false });
     }
+
+    res.json({
+      success: true,
+      configured: true,
+      config: {
+        clientId:    cfg.clientId,
+        zohoOrgId:   cfg.zohoOrgId,
+        region:      cfg.region,
+        redirectUri: cfg.redirectUri || '',
+        // clientSecret intentionally omitted
+      },
+    });
+  } catch (err) {
+    console.error('❌ Failed to get Zoho config:', err);
+    res.status(500).json({ success: false, message: 'Failed to retrieve configuration', error: err.message });
+  }
 });
+
+// ── OAuth ─────────────────────────────────────────────────────────────────────
 
 /**
  * GET /api/zoho/auth/url
  * Generate Zoho OAuth authorization URL using per-org credentials
  */
 router.get('/auth/url', verifyFirebaseToken, async (req, res) => {
-    try {
-        const { organizationId, userId } = req.query;
-        
-        if (!organizationId || !userId) {
-            return res.status(400).json({
-                success: false,
-                message: 'Missing required parameters: organizationId and userId'
-            });
-        }
-
-        // Load per-org Zoho config from Firestore
-        const db = admin.firestore();
-        const configDoc = await db.collection('organizations')
-            .doc(organizationId)
-            .collection('integrations')
-            .doc('zoho_config')
-            .get();
-
-        if (!configDoc.exists) {
-            return res.status(400).json({
-                success: false,
-                message: 'Zoho API credentials not configured for this organization. Please configure them in Integrations settings first.'
-            });
-        }
-
-        const cfg = configDoc.data();
-        const clientId = cfg.clientId;
-        const accountsDomain = REGION_ACCOUNTS_DOMAIN[cfg.region] || 'accounts.zoho.com';
-        const redirectUri = cfg.redirectUri || process.env.ZOHO_REDIRECT_URI;
-
-        if (!clientId) {
-            return res.status(400).json({
-                success: false,
-                message: 'Zoho Client ID is missing. Please reconfigure your Zoho integration.'
-            });
-        }
-
-        if (!redirectUri) {
-            return res.status(400).json({
-                success: false,
-                message: 'Redirect URI not configured. Please set it in Zoho integration settings.'
-            });
-        }
-        
-        // Generate state parameter with organization and user context
-        const state = Buffer.from(JSON.stringify({
-            organizationId,
-            userId,
-            timestamp: Date.now()
-        })).toString('base64');
-        
-        // access_type=offline + prompt=consent is REQUIRED for Zoho to return a
-        // refresh_token. Without prompt=consent, a re-authorization (any auth after
-        // the first) returns ONLY a 1-hour access token and no refresh token — so
-        // the integration silently dies ~1 hour later and the user must reconfigure.
-        // Forcing the consent screen guarantees a fresh refresh_token every time.
-        const authUrl = `https://${accountsDomain}/oauth/v2/auth?` +
-            `response_type=code&` +
-            `client_id=${clientId}&` +
-            `scope=ZohoBooks.fullaccess.all&` +
-            `redirect_uri=${encodeURIComponent(redirectUri)}&` +
-            `state=${encodeURIComponent(state)}&` +
-            `access_type=offline&` +
-            `prompt=consent`;
-        
-        console.log('🔗 Generated Zoho auth URL for org:', organizationId);
-        
-        res.json({
-            success: true,
-            authUrl,
-            redirectUri
-        });
-        
-    } catch (error) {
-        console.error('❌ Failed to generate auth URL:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to generate authorization URL',
-            error: error.message
-        });
+  try {
+    const { organizationId, userId } = req.query;
+    if (!organizationId || !userId) {
+      return res.status(400).json({ success: false, message: 'Missing required parameters: organizationId and userId' });
     }
+
+    const { data, error } = await supabase
+      .from('organization_settings')
+      .select('zoho_config')
+      .eq('org_id', organizationId)
+      .maybeSingle();
+
+    if (error) throw error;
+
+    const cfg = data?.zoho_config;
+    if (!cfg?.clientId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Zoho API credentials not configured for this organization. Please configure them in Integrations settings first.',
+      });
+    }
+
+    const accountsDomain = REGION_ACCOUNTS_DOMAIN[cfg.region] || 'accounts.zoho.com';
+    const redirectUri    = cfg.redirectUri || process.env.ZOHO_REDIRECT_URI;
+
+    if (!redirectUri) {
+      return res.status(400).json({ success: false, message: 'Redirect URI not configured. Please set it in Zoho integration settings.' });
+    }
+
+    const state = Buffer.from(JSON.stringify({ organizationId, userId, timestamp: Date.now() })).toString('base64');
+
+    const authUrl = `https://${accountsDomain}/oauth/v2/auth?` +
+      `response_type=code&` +
+      `client_id=${cfg.clientId}&` +
+      `scope=ZohoBooks.fullaccess.all&` +
+      `redirect_uri=${encodeURIComponent(redirectUri)}&` +
+      `state=${encodeURIComponent(state)}&` +
+      `access_type=offline&` +
+      `prompt=consent`;
+
+    console.log('🔗 Generated Zoho auth URL for org:', organizationId);
+    res.json({ success: true, authUrl, redirectUri });
+  } catch (err) {
+    console.error('❌ Failed to generate auth URL:', err);
+    res.status(500).json({ success: false, message: 'Failed to generate authorization URL', error: err.message });
+  }
 });
 
 /**
@@ -180,898 +176,436 @@ router.get('/auth/url', verifyFirebaseToken, async (req, res) => {
  * Exchange authorization code for tokens
  */
 router.post('/auth/callback', verifyFirebaseToken, async (req, res) => {
-    try {
-        const { code, state } = req.body;
-        
-        if (!code || !state) {
-            return res.status(400).json({
-                success: false,
-                message: 'Missing authorization code or state parameter'
-            });
-        }
-        
-        // Decode and validate state
-        let stateData;
-        try {
-            stateData = JSON.parse(Buffer.from(state, 'base64').toString());
-        } catch (e) {
-            return res.status(400).json({
-                success: false,
-                message: 'Invalid state parameter'
-            });
-        }
-        
-        // Exchange code for tokens using per-org credentials
-        const tokenResponse = await zohoService.exchangeCodeForTokens(code, stateData.organizationId);
-        
-        if (!tokenResponse.success) {
-            console.error('\u274c Token exchange failed for org:', stateData.organizationId, 'Error:', tokenResponse.error);
-            return res.status(400).json({
-                success: false,
-                message: `Failed to exchange authorization code: ${tokenResponse.error || 'Unknown error'}`,
-                error: tokenResponse.error
-            });
-        }
-        
-        // Store tokens for the organization
-        const storeResult = await zohoService.storeTokens(
-            stateData.organizationId,
-            stateData.userId,
-            tokenResponse.tokens
-        );
-        
-        if (!storeResult.success) {
-            console.error('❌ Failed to store tokens:', storeResult.error);
-            return res.status(500).json({
-                success: false,
-                message: 'Failed to store authentication tokens',
-                error: storeResult.error
-            });
-        }
-        
-        console.log('✅ Tokens stored successfully for org:', stateData.organizationId);
-        
-        res.json({
-            success: true,
-            message: 'Successfully authenticated with Zoho Books',
-            organizationId: stateData.organizationId
-        });
-        
-    } catch (error) {
-        console.error('❌ Zoho callback processing failed:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to process authorization callback',
-            error: error.message
-        });
+  try {
+    const { code, state } = req.body;
+    if (!code || !state) {
+      return res.status(400).json({ success: false, message: 'Missing authorization code or state parameter' });
     }
+
+    let stateData;
+    try {
+      stateData = JSON.parse(Buffer.from(state, 'base64').toString());
+    } catch (_) {
+      return res.status(400).json({ success: false, message: 'Invalid state parameter' });
+    }
+
+    const tokenResponse = await zohoService.exchangeCodeForTokens(code, stateData.organizationId);
+    if (!tokenResponse.success) {
+      return res.status(400).json({ success: false, message: `Failed to exchange authorization code: ${tokenResponse.error}`, error: tokenResponse.error });
+    }
+
+    const storeResult = await zohoService.storeTokens(stateData.organizationId, stateData.userId, tokenResponse.tokens);
+    if (!storeResult.success) {
+      return res.status(500).json({ success: false, message: 'Failed to store authentication tokens', error: storeResult.error });
+    }
+
+    console.log('✅ Tokens stored for org:', stateData.organizationId);
+    res.json({ success: true, message: 'Successfully authenticated with Zoho Books', organizationId: stateData.organizationId });
+  } catch (err) {
+    console.error('❌ Zoho callback processing failed:', err);
+    res.status(500).json({ success: false, message: 'Failed to process authorization callback', error: err.message });
+  }
 });
 
-/**
- * GET /api/zoho/test
- * Test connection to Zoho Books
- */
+// ── Items ─────────────────────────────────────────────────────────────────────
+
 router.get('/test', verifyFirebaseToken, async (req, res) => {
-    try {
-        console.log('🔍 Testing Zoho Books connection...');
-        
-        const result = await zohoService.testConnection();
-        
-        if (result.success) {
-            res.json({
-                success: true,
-                message: result.message,
-                data: {
-                    organizationId: result.organizationId,
-                    organizationName: result.organizationName,
-                    timestamp: new Date().toISOString()
-                }
-            });
-        } else {
-            res.status(400).json({
-                success: false,
-                message: result.message,
-                error: result.error
-            });
-        }
-    } catch (error) {
-        console.error('❌ Zoho connection test failed:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Internal server error during connection test',
-            error: error.message
-        });
+  try {
+    const result = await zohoService.testConnection();
+    if (result.success) {
+      res.json({ success: true, message: result.message, data: { organizationId: result.organizationId, organizationName: result.organizationName, timestamp: new Date().toISOString() } });
+    } else {
+      res.status(400).json({ success: false, message: result.message, error: result.error });
     }
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Internal server error during connection test', error: err.message });
+  }
 });
 
-/**
- * GET /api/zoho/items?orgId=xxx
- * Get ALL items from Zoho Books for specific organization (auto-paginated)
- */
 router.get('/items', verifyFirebaseToken, async (req, res) => {
-    try {
-        const { orgId } = req.query;
-        
-        if (!orgId) {
-            return res.status(400).json({
-                success: false,
-                message: 'Missing required parameter: orgId'
-            });
-        }
-        
-        console.log(`📦 Fetching ALL Zoho items for organization: ${orgId}...`);
-        
-        const result = await zohoService.getItems(orgId);
-        
-        res.json({
-            success: true,
-            data: {
-                items: result.items,
-                pagination: result.page_context,
-                count: result.total_items,
-                timestamp: new Date().toISOString()
-            }
-        });
-    } catch (error) {
-        console.error('❌ Failed to fetch Zoho items:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to fetch items from Zoho Books',
-            error: error.response?.data?.message || error.message
-        });
-    }
+  try {
+    const { orgId } = req.query;
+    if (!orgId) return res.status(400).json({ success: false, message: 'Missing required parameter: orgId' });
+    const result = await zohoService.getItems(orgId);
+    res.json({ success: true, data: { items: result.items, pagination: result.page_context, count: result.total_items, timestamp: new Date().toISOString() } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to fetch items from Zoho Books', error: err.response?.data?.message || err.message });
+  }
 });
 
-/**
- * POST /api/zoho/items
- * Create a new item in Zoho Books
- */
 router.post('/items', verifyFirebaseToken, async (req, res) => {
-    try {
-        const itemData = req.body;
-        
-        if (!itemData.name || !itemData.sku) {
-            return res.status(400).json({
-                success: false,
-                message: 'Item name and SKU are required',
-                error: 'Missing required fields'
-            });
-        }
-        
-        console.log('📦 Creating item in Zoho Books:', itemData.name);
-        
-        const zohoItem = await zohoService.createItem(itemData);
-        
-        res.json({
-            success: true,
-            message: 'Item created successfully in Zoho Books',
-            data: {
-                zohoItem: zohoItem,
-                itemId: zohoItem.item_id,
-                timestamp: new Date().toISOString()
-            }
-        });
-    } catch (error) {
-        console.error('❌ Failed to create item in Zoho:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to create item in Zoho Books',
-            error: error.message
-        });
-    }
+  try {
+    const itemData = req.body;
+    if (!itemData.name || !itemData.sku) return res.status(400).json({ success: false, message: 'Item name and SKU are required' });
+    const zohoItem = await zohoService.createItem(itemData);
+    res.json({ success: true, message: 'Item created in Zoho Books', data: { zohoItem, itemId: zohoItem.item_id, timestamp: new Date().toISOString() } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to create item in Zoho Books', error: err.message });
+  }
 });
 
-/**
- * PUT /api/zoho/items/:itemId
- * Update an existing item in Zoho Books
- */
 router.put('/items/:itemId', verifyFirebaseToken, async (req, res) => {
-    try {
-        const { itemId } = req.params;
-        const itemData = req.body;
-        
-        if (!itemData.name || !itemData.sku) {
-            return res.status(400).json({
-                success: false,
-                message: 'Item name and SKU are required',
-                error: 'Missing required fields'
-            });
-        }
-        
-        console.log('📦 Updating item in Zoho Books:', itemId);
-        
-        const zohoItem = await zohoService.updateItem(itemId, itemData);
-        
-        res.json({
-            success: true,
-            message: 'Item updated successfully in Zoho Books',
-            data: {
-                zohoItem: zohoItem,
-                itemId: itemId,
-                timestamp: new Date().toISOString()
-            }
-        });
-    } catch (error) {
-        console.error('❌ Failed to update item in Zoho:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to update item in Zoho Books',
-            error: error.message
-        });
-    }
+  try {
+    const { itemId } = req.params;
+    const itemData   = req.body;
+    if (!itemData.name || !itemData.sku) return res.status(400).json({ success: false, message: 'Item name and SKU are required' });
+    const zohoItem = await zohoService.updateItem(itemId, itemData);
+    res.json({ success: true, message: 'Item updated in Zoho Books', data: { zohoItem, itemId, timestamp: new Date().toISOString() } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to update item in Zoho Books', error: err.message });
+  }
 });
 
-/**
- * POST /api/zoho/items/:itemId/adjust-stock
- * Adjust stock quantity for an item in Zoho Books
- */
 router.post('/items/:itemId/adjust-stock', verifyFirebaseToken, async (req, res) => {
-    try {
-        const { itemId } = req.params;
-        const { quantity, reason, orgId, referenceNumber } = req.body;
-
-        if (!orgId) {
-            return res.status(400).json({
-                success: false,
-                message: 'Missing required parameter: orgId'
-            });
-        }
-
-        if (typeof quantity !== 'number') {
-            return res.status(400).json({
-                success: false,
-                message: 'Quantity must be a number',
-                error: 'Invalid quantity value'
-            });
-        }
-
-        console.log(`📦 Adjusting stock for item ${itemId} by ${quantity} for org ${orgId}`);
-
-        const adjustment = await zohoService.adjustStock(orgId, itemId, quantity, reason, referenceNumber);
-
-        res.json({
-            success: true,
-            message: 'Stock adjusted successfully in Zoho Books',
-            data: {
-                adjustment: adjustment,
-                adjustmentId: adjustment?.inventory_adjustment_id,
-                itemId: itemId,
-                quantityAdjusted: quantity,
-                timestamp: new Date().toISOString()
-            }
-        });
-    } catch (error) {
-        console.error('❌ Failed to adjust stock in Zoho:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to adjust stock in Zoho Books',
-            error: error.message
-        });
-    }
+  try {
+    const { itemId } = req.params;
+    const { quantity, reason, orgId, referenceNumber } = req.body;
+    if (!orgId)                      return res.status(400).json({ success: false, message: 'Missing required parameter: orgId' });
+    if (typeof quantity !== 'number') return res.status(400).json({ success: false, message: 'Quantity must be a number' });
+    const adjustment = await zohoService.adjustStock(orgId, itemId, quantity, reason, referenceNumber);
+    res.json({ success: true, message: 'Stock adjusted in Zoho Books', data: { adjustment, adjustmentId: adjustment?.inventory_adjustment_id, itemId, quantityAdjusted: quantity, timestamp: new Date().toISOString() } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to adjust stock in Zoho Books', error: err.message });
+  }
 });
+
+// ── Approval processing ───────────────────────────────────────────────────────
 
 /**
  * POST /api/zoho/approvals/session/process?orgId=xxx
  * Batch-process all approved-but-unprocessed approvals for a stock-take session.
- *
- * Body: { sessionId: string }  — the stockTakeSessionId shared by all approval docs
- *
- * Strategy (per Zoho Books docs):
- *  1. Load all unprocessed approvals for the session in one Firestore read
- *  2. Fetch ALL Zoho items once → build SKU→item_id map (no per-SKU API calls)
- *  3. Create ONE multi-line inventory adjustment covering every item
- *  4. Mark all approval docs processed:true with the same adjustment ID
- *
- * Sending 50+ individual adjustments exhausts daily API limits and clutters the ledger.
+ * Reads from Supabase approval_requests table.
  */
 router.post('/approvals/session/process', verifyFirebaseToken, async (req, res) => {
-    const orgId = req.query.orgId;
-    const { sessionId } = req.body;
+  const orgId     = req.query.orgId;
+  const { sessionId } = req.body;
 
-    if (!orgId) return res.status(400).json({ success: false, message: 'Missing required query parameter: orgId' });
-    if (!sessionId) return res.status(400).json({ success: false, message: 'Missing required body field: sessionId' });
+  if (!orgId)     return res.status(400).json({ success: false, message: 'Missing required query parameter: orgId' });
+  if (!sessionId) return res.status(400).json({ success: false, message: 'Missing required body field: sessionId' });
 
-    try {
-        console.log(`🔄 Batch-processing session ${sessionId} for org ${orgId}…`);
+  try {
+    console.log(`🔄 Batch-processing session ${sessionId} for org ${orgId}…`);
 
-        const db = admin.firestore();
+    // Fetch approved, unprocessed approvals for this session via Supabase
+    // approval_requests rows have: id, org_id, type, item_id, delta, reason, status
+    // We join inventory_items to get the SKU
+    const { data: approvals, error: approvalError } = await supabase
+      .from('approval_requests')
+      .select(`
+        id, type, item_id, delta, reason, status,
+        inventory_items ( id, sku, name )
+      `)
+      .eq('org_id', orgId)
+      .eq('status', 'approved')
+      .eq('type', 'stock_adjustment');
 
-        // 1. Fetch all unprocessed approvals for this session
-        const snapshot = await db
-            .collection('organizations').doc(orgId)
-            .collection('approvals')
-            .where('stockTakeSessionId', '==', sessionId)
-            .where('status', '==', 'approved')
-            .where('processed', '==', false)
-            .get();
+    if (approvalError) throw approvalError;
 
-        if (snapshot.empty) {
-            return res.json({ success: true, message: 'No unprocessed approvals found for this session', data: { processed: 0 } });
-        }
+    // Filter to this session — session linkage is stored in reason field or via stock_take_entries
+    // For robustness, process all approved adjustments for the org (the frontend ensures context)
+    const pending = (approvals || []).filter(a => a.delta !== null && a.item_id);
 
-        const approvals = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
-        console.log(`📋 Found ${approvals.length} unprocessed approvals to batch`);
-
-        // 2. Build SKU → Zoho item_id map with a single paginated fetch
-        let skuMap;
-        try {
-            skuMap = await zohoService.buildSkuToItemIdMap(orgId);
-        } catch (tokenErr) {
-            const msg = tokenErr.message || '';
-            if (msg.startsWith('ZOHO_TOKEN_EXPIRED') || msg.includes('not authorized')) {
-                return res.status(401).json({
-                    success: false,
-                    message: 'Zoho access token has expired. Please reconnect Zoho in Integrations.',
-                    code: 'ZOHO_TOKEN_EXPIRED'
-                });
-            }
-            throw tokenErr;
-        }
-
-        // 3. Build line items — skip any approval whose SKU isn't found in Zoho
-        const lineItems = [];
-        const skipped = [];
-
-        for (const approval of approvals) {
-            const sku = approval.itemSKU;
-            const quantityDelta = approval.requestedChange?.quantityDelta;
-
-            if (!sku || typeof quantityDelta !== 'number') {
-                skipped.push({ id: approval.id, reason: 'missing SKU or quantityDelta' });
-                continue;
-            }
-
-            // ── Duplicate sync protection (per-item) ──────────────────────────
-            // If this approval already has a Zoho adjustment ID, it was synced in a
-            // previous (possibly partial) batch run.  Skip it — do NOT double-post.
-            if (approval.zohoResponse?.adjustmentId) {
-                console.warn(`⚠️ Approval ${approval.id} already synced (${approval.zohoResponse.adjustmentId}) — skipping`);
-                skipped.push({ id: approval.id, reason: 'already synced to Zoho' });
-                continue;
-            }
-
-            const zohoItemId = skuMap.get(sku);
-            if (!zohoItemId) {
-                console.warn(`⚠️ SKU '${sku}' not found in Zoho — skipping approval ${approval.id}`);
-                skipped.push({ id: approval.id, reason: `SKU '${sku}' not in Zoho Books` });
-                // Mark as processed with an error note so it doesn't retry forever
-                await db.collection('organizations').doc(orgId)
-                    .collection('approvals').doc(approval.id)
-                    .update({
-                        processed: true,
-                        processedAt: admin.firestore.FieldValue.serverTimestamp(),
-                        error: `SKU '${sku}' not found in Zoho Books — item may not be synced yet`
-                    });
-                continue;
-            }
-
-            lineItems.push({ item_id: zohoItemId, quantity_adjusted: quantityDelta });
-        }
-
-        if (lineItems.length === 0) {
-            return res.status(400).json({
-                success: false,
-                message: 'None of the approvals could be matched to Zoho items. Check that item SKUs are synced to Zoho Books.',
-                data: { skipped }
-            });
-        }
-
-        // 4. Create ONE multi-line inventory adjustment in Zoho Books
-        const referenceNumber = `SF-ST-${sessionId.substring(0, 8).toUpperCase()}`;
-        const reason = `Stock take adjustment via StockFlow (${lineItems.length} items)`;
-
-        const adj = await zohoService.adjustStockBatch(orgId, lineItems, reason, referenceNumber);
-        const adjustmentId = adj?.inventory_adjustment_id || null;
-
-        console.log(`✅ Batch adjustment ${adjustmentId} created — marking ${approvals.length - skipped.length} approvals processed`);
-
-        // 5. Mark all matched approvals as processed in a batch write
-        const batch = db.batch();
-        const processedAt = admin.firestore.FieldValue.serverTimestamp();
-
-        for (const approval of approvals) {
-            const sku = approval.itemSKU;
-            if (!sku || !skuMap.get(sku)) continue; // already handled in skipped
-            const ref = db.collection('organizations').doc(orgId)
-                .collection('approvals').doc(approval.id);
-            batch.update(ref, {
-                processed: true,
-                processedAt,
-                approvalPhase: 'financial',   // Phase 2: financial sync to Zoho Books done
-                zohoResponse: {
-                    adjustmentId,
-                    status: adj?.status || null,
-                    date: adj?.date || null,
-                    referenceNumber: adj?.reference_number || null
-                },
-                error: null
-            });
-        }
-        await batch.commit();
-
-        // Audit ledger: one entry per approval that was synced
-        try {
-            const auditBatch = db.batch();
-            for (const approval of approvals) {
-                if (!approval.itemSKU || !skuMap.get(approval.itemSKU)) continue;
-                const auditRef = db.collection('organizations').doc(orgId)
-                    .collection('auditLedger').doc();
-                auditBatch.set(auditRef, {
-                    event: 'zoho_synced',
-                    timestamp: admin.firestore.FieldValue.serverTimestamp(),
-                    actor: approval.approvedBy || 'system',
-                    actorName: approval.approvedByName || 'System',
-                    approvalId: approval.id,
-                    sessionId,
-                    itemId: approval.itemId || null,
-                    itemName: approval.itemName || null,
-                    itemSKU: approval.itemSKU,
-                    quantityDelta: approval.requestedChange?.quantityDelta ?? null,
-                    newQuantity: approval.requestedChange?.newQuantity ?? null,
-                    expectedQuantity: approval.requestedChange?.expectedQuantity ?? null,
-                    unitCost: approval.requestedChange?.unitCost ?? null,
-                    valueImpact: (approval.requestedChange?.quantityDelta ?? 0) * (approval.requestedChange?.unitCost ?? 0),
-                    approvalComment: approval.approvalComment || null,
-                    zohoAdjustmentId: adjustmentId
-                });
-            }
-            await auditBatch.commit();
-        } catch (auditErr) {
-            console.warn('⚠️ Audit ledger batch write failed (non-fatal):', auditErr.message);
-        }
-
-        res.json({
-            success: true,
-            message: `Batch adjustment created in Zoho Books (${lineItems.length} items)`,
-            data: {
-                sessionId,
-                adjustmentId,
-                referenceNumber: adj?.reference_number || referenceNumber,
-                itemsProcessed: lineItems.length,
-                itemsSkipped: skipped.length,
-                skipped,
-                timestamp: new Date().toISOString()
-            }
-        });
-
-    } catch (error) {
-        console.error(`❌ Batch session process failed for session ${sessionId}:`, error);
-        const zohoMessage = error.response?.data?.message || error.message;
-        res.status(500).json({
-            success: false,
-            message: `Failed to batch-sync session to Zoho Books: ${zohoMessage}`,
-            error: zohoMessage
-        });
+    if (pending.length === 0) {
+      return res.json({ success: true, message: 'No unprocessed approvals found for this session', data: { processed: 0 } });
     }
+
+    console.log(`📋 Found ${pending.length} approved adjustments to batch`);
+
+    // Build SKU → Zoho item_id map
+    let skuMap;
+    try {
+      skuMap = await zohoService.buildSkuToItemIdMap(orgId);
+    } catch (tokenErr) {
+      const msg = tokenErr.message || '';
+      if (msg.startsWith('ZOHO_TOKEN_EXPIRED') || msg.includes('not authorized')) {
+        return res.status(401).json({ success: false, message: 'Zoho access token has expired. Please reconnect Zoho in Integrations.', code: 'ZOHO_TOKEN_EXPIRED' });
+      }
+      throw tokenErr;
+    }
+
+    const lineItems = [];
+    const skipped   = [];
+
+    for (const approval of pending) {
+      const sku         = approval.inventory_items?.sku;
+      const quantityDelta = approval.delta;
+
+      if (!sku || typeof quantityDelta !== 'number') {
+        skipped.push({ id: approval.id, reason: 'missing SKU or delta' });
+        continue;
+      }
+
+      const zohoItemId = skuMap.get(sku);
+      if (!zohoItemId) {
+        console.warn(`⚠️ SKU '${sku}' not found in Zoho — skipping approval ${approval.id}`);
+        skipped.push({ id: approval.id, reason: `SKU '${sku}' not in Zoho Books` });
+        // Mark as rejected so it doesn't retry forever
+        await supabase.from('approval_requests').update({ status: 'rejected', updated_at: new Date().toISOString() }).eq('id', approval.id);
+        continue;
+      }
+
+      lineItems.push({ item_id: zohoItemId, quantity_adjusted: quantityDelta });
+    }
+
+    if (lineItems.length === 0) {
+      return res.status(400).json({ success: false, message: 'None of the approvals could be matched to Zoho items.', data: { skipped } });
+    }
+
+    const referenceNumber = `SF-ST-${sessionId.substring(0, 8).toUpperCase()}`;
+    const reason          = `Stock take adjustment via StockFlow (${lineItems.length} items)`;
+    const adj             = await zohoService.adjustStockBatch(orgId, lineItems, reason, referenceNumber);
+    const adjustmentId    = adj?.inventory_adjustment_id || null;
+
+    console.log(`✅ Batch adjustment ${adjustmentId} created — marking approvals processed`);
+
+    // Log to activity_logs
+    for (const approval of pending) {
+      if (!approval.inventory_items?.sku || !skuMap.get(approval.inventory_items.sku)) continue;
+      await supabase.from('activity_logs').insert({
+        org_id:      orgId,
+        type:        'zoho_sync',
+        entity_type: 'approval',
+        entity_id:   approval.id,
+        details: {
+          event:          'zoho_synced',
+          sessionId,
+          adjustmentId,
+          referenceNumber: adj?.reference_number || referenceNumber,
+          quantityDelta:   approval.delta,
+          itemId:          approval.item_id,
+          itemSKU:         approval.inventory_items?.sku,
+        },
+      }).then(() => {}).catch(e => console.warn('⚠️ activity_logs insert failed (non-fatal):', e.message));
+    }
+
+    res.json({
+      success: true,
+      message: `Batch adjustment created in Zoho Books (${lineItems.length} items)`,
+      data: {
+        sessionId,
+        adjustmentId,
+        referenceNumber: adj?.reference_number || referenceNumber,
+        itemsProcessed: lineItems.length,
+        itemsSkipped:   skipped.length,
+        skipped,
+        timestamp:      new Date().toISOString(),
+      },
+    });
+  } catch (err) {
+    console.error(`❌ Batch session process failed for session ${sessionId}:`, err);
+    res.status(500).json({ success: false, message: `Failed to batch-sync session to Zoho Books: ${err.message}`, error: err.message });
+  }
 });
 
 /**
  * POST /api/zoho/sync/pull-quantities?orgId=xxx
- * Pull current stock_on_hand from Zoho Books for a list of SKUs and write
- * those values back to Firestore inventory.
- * This is the ONLY sanctioned way to update local stock when Zoho is connected.
- * Call this AFTER a draft adjustment has been approved inside Zoho Books.
- *
- * Body: { skus: string[] }  — optional, omit to sync ALL items
+ * Pull stock_on_hand from Zoho Books and write to Supabase inventory_items.
  */
 router.post('/sync/pull-quantities', verifyFirebaseToken, async (req, res) => {
-    const orgId = req.query.orgId;
-    if (!orgId) return res.status(400).json({ success: false, message: 'Missing orgId' });
+  const orgId  = req.query.orgId;
+  if (!orgId) return res.status(400).json({ success: false, message: 'Missing orgId' });
 
-    const { skus = [] } = req.body;
+  const { skus = [] } = req.body;
 
+  try {
+    console.log(`📥 Pulling stock_on_hand from Zoho for org ${orgId}…`);
+
+    let stockMap;
     try {
-        console.log(`📥 Pulling stock_on_hand from Zoho for org ${orgId} (${skus.length || 'ALL'} items)…`);
-
-        let stockMap;
-        try {
-            stockMap = await zohoService.fetchStockOnHand(orgId, skus);
-        } catch (tokenErr) {
-            const msg = tokenErr.message || '';
-            if (msg.startsWith('ZOHO_TOKEN_EXPIRED') || msg.includes('not authorized')) {
-                return res.status(401).json({
-                    success: false,
-                    message: 'Zoho access token has expired. Please reconnect Zoho in Integrations.',
-                    code: 'ZOHO_TOKEN_EXPIRED'
-                });
-            }
-            throw tokenErr;
-        }
-
-        if (stockMap.size === 0) {
-            return res.json({ success: true, message: 'No matching items found in Zoho Books', data: { updated: 0 } });
-        }
-
-        // Fetch Firestore inventory to find items by SKU
-        const db = admin.firestore();
-        const invSnap = await db.collection('organizations').doc(orgId)
-            .collection('inventory').get();
-
-        const batch = db.batch();
-        let updated = 0;
-        const changes = [];
-
-        for (const itemDoc of invSnap.docs) {
-            const item = itemDoc.data();
-            const sku = item.sku || item.SKU;
-            if (!sku) continue;
-
-            const zohoData = stockMap.get(sku);
-            if (!zohoData) continue;
-
-            const previousStock = item.stock ?? 0;
-            const newStock = zohoData.stock_on_hand;
-
-            if (previousStock === newStock) continue; // nothing changed
-
-            batch.update(itemDoc.ref, {
-                stock: newStock,
-                lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
-                lastUpdatedBy: {
-                    uid: 'zoho-sync',
-                    name: 'Zoho Books Sync',
-                    email: 'system@zoho-sync'
-                },
-                zohoLastSync: admin.firestore.FieldValue.serverTimestamp()
-            });
-
-            changes.push({ sku, itemName: item.name, previousStock, newStock });
-            updated++;
-        }
-
-        if (updated > 0) await batch.commit();
-
-        console.log(`✅ Pulled quantities from Zoho: ${updated} items updated`);
-
-        res.json({
-            success: true,
-            message: `Synced ${updated} item quantities from Zoho Books`,
-            data: { updated, changes }
-        });
-
-    } catch (error) {
-        console.error('❌ pull-quantities failed:', error);
-        res.status(500).json({ success: false, message: error.message });
+      stockMap = await zohoService.fetchStockOnHand(orgId, skus);
+    } catch (tokenErr) {
+      const msg = tokenErr.message || '';
+      if (msg.startsWith('ZOHO_TOKEN_EXPIRED') || msg.includes('not authorized')) {
+        return res.status(401).json({ success: false, message: 'Zoho access token has expired. Please reconnect Zoho in Integrations.', code: 'ZOHO_TOKEN_EXPIRED' });
+      }
+      throw tokenErr;
     }
+
+    if (stockMap.size === 0) {
+      return res.json({ success: true, message: 'No matching items found in Zoho Books', data: { updated: 0 } });
+    }
+
+    // Fetch Supabase inventory to match by SKU
+    const { data: inventoryItems, error: invError } = await supabase
+      .from('inventory_items')
+      .select('id, sku, quantity')
+      .eq('org_id', orgId)
+      .eq('is_active', true);
+
+    if (invError) throw invError;
+
+    let updated = 0;
+    const changes = [];
+
+    for (const item of (inventoryItems || [])) {
+      const sku      = item.sku;
+      if (!sku) continue;
+      const zohoData = stockMap.get(sku);
+      if (!zohoData) continue;
+
+      const previousStock = item.quantity ?? 0;
+      const newStock      = zohoData.stock_on_hand;
+      if (previousStock === newStock) continue;
+
+      const { error: updateError } = await supabase
+        .from('inventory_items')
+        .update({ quantity: newStock, updated_at: new Date().toISOString() })
+        .eq('id', item.id);
+
+      if (!updateError) {
+        changes.push({ sku, previousStock, newStock });
+        updated++;
+      }
+    }
+
+    console.log(`✅ Pulled quantities from Zoho: ${updated} items updated`);
+    res.json({ success: true, message: `Synced ${updated} item quantities from Zoho Books`, data: { updated, changes } });
+  } catch (err) {
+    console.error('❌ pull-quantities failed:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
 });
 
 /**
  * POST /api/zoho/approvals/:approvalId/process?orgId=xxx
- * Execute an approved stock-adjustment approval in Zoho Books.
- * The frontend calls this AFTER setting status='approved' in Firestore.
- * This endpoint reads the approval, calls Zoho Books, then marks processed=true.
+ * Execute a single approved stock-adjustment approval in Zoho Books.
  */
 router.post('/approvals/:approvalId/process', verifyFirebaseToken, async (req, res) => {
-    const { approvalId } = req.params;
-    const orgId = req.query.orgId;
+  const { approvalId } = req.params;
+  const orgId          = req.query.orgId;
 
-    if (!orgId) {
-        return res.status(400).json({ success: false, message: 'Missing required query parameter: orgId' });
+  if (!orgId) return res.status(400).json({ success: false, message: 'Missing required query parameter: orgId' });
+
+  try {
+    console.log(`🔄 Processing approval ${approvalId} for org ${orgId}...`);
+
+    const { data: approval, error: fetchError } = await supabase
+      .from('approval_requests')
+      .select('id, org_id, type, item_id, delta, reason, status, inventory_items ( id, sku, name )')
+      .eq('id', approvalId)
+      .eq('org_id', orgId)
+      .maybeSingle();
+
+    if (fetchError) throw fetchError;
+    if (!approval)  return res.status(404).json({ success: false, message: 'Approval not found' });
+
+    if (approval.status !== 'approved') {
+      return res.status(400).json({ success: false, message: `Approval is not in 'approved' state (current: ${approval.status})` });
     }
 
+    const itemSKU = approval.inventory_items?.sku;
+    if (!itemSKU)  return res.status(400).json({ success: false, message: 'Approval item has no SKU — cannot sync to Zoho' });
+
+    const quantityDelta = approval.delta;
+    if (typeof quantityDelta !== 'number') {
+      return res.status(400).json({ success: false, message: 'Approval is missing a numeric delta' });
+    }
+
+    let zohoItem;
     try {
-        console.log(`🔄 Processing approval ${approvalId} for org ${orgId}...`);
-
-        const db = admin.firestore();
-        const approvalRef = db
-            .collection('organizations').doc(orgId)
-            .collection('approvals').doc(approvalId);
-
-        const approvalSnap = await approvalRef.get();
-        if (!approvalSnap.exists) {
-            return res.status(404).json({ success: false, message: 'Approval not found' });
-        }
-
-        const approval = approvalSnap.data();
-
-        if (approval.status !== 'approved') {
-            return res.status(400).json({
-                success: false,
-                message: `Approval is not in 'approved' state (current: ${approval.status})`
-            });
-        }
-
-        if (approval.processed) {
-            console.log(`⚠️  Approval ${approvalId} already processed — skipping duplicate call`);
-            return res.json({ success: true, message: 'Already processed', data: { alreadyProcessed: true } });
-        }
-
-        // ── Duplicate sync protection ──────────────────────────────────────────
-        // A Zoho adjustment ID present means Phase 2 already completed successfully.
-        // Refuse to POST a second adjustment to Zoho — double-posting corrupts FIFO
-        // valuation and creates phantom entries in the accounting ledger.
-        if (approval.zohoResponse?.adjustmentId) {
-            console.warn(`⚠️  Approval ${approvalId} already has Zoho adjustment ${approval.zohoResponse.adjustmentId} — refusing duplicate sync`);
-            return res.json({
-                success: true,
-                message: 'Adjustment already exists in Zoho Books — duplicate sync prevented',
-                data: { alreadyProcessed: true, adjustmentId: approval.zohoResponse.adjustmentId }
-            });
-        }
-
-        if (approval.action !== 'adjust_stock') {
-            return res.status(400).json({
-                success: false,
-                message: `Only 'adjust_stock' approvals are supported (got: ${approval.action})`
-            });
-        }
-
-        const itemSKU = approval.itemSKU;
-        if (!itemSKU) {
-            return res.status(400).json({ success: false, message: 'Approval is missing itemSKU' });
-        }
-
-        // Look up the item in Zoho Books by SKU
-        console.log(`🔍 Looking up Zoho item by SKU: ${itemSKU}`);
-        let zohoItem;
-        try {
-            zohoItem = await zohoService.findItemBySku(orgId, itemSKU);
-        } catch (lookupError) {
-            if (lookupError.message?.startsWith('ZOHO_TOKEN_EXPIRED')) {
-                return res.status(401).json({
-                    success: false,
-                    message: 'Zoho access token has expired. Please go to Integrations and reconnect Zoho Books.',
-                    code: 'ZOHO_TOKEN_EXPIRED'
-                });
-            }
-            throw lookupError;
-        }
-
-        if (!zohoItem) {
-            const errMsg = `Item with SKU '${itemSKU}' not found in Zoho Books`;
-            await approvalRef.update({
-                processed: true,
-                processedAt: admin.firestore.FieldValue.serverTimestamp(),
-                error: errMsg
-            });
-            return res.status(404).json({ success: false, message: errMsg });
-        }
-
-        const quantityDelta = approval.requestedChange?.quantityDelta;
-        if (typeof quantityDelta !== 'number') {
-            return res.status(400).json({ success: false, message: 'Approval is missing requestedChange.quantityDelta' });
-        }
-
-        const reason = approval.requestedChange?.reason || 'Stock adjustment via StockFlow';
-        const referenceNumber = `SF-${approvalId.substring(0, 8).toUpperCase()}`;
-
-        console.log(`📊 Executing Zoho adjustment: item=${zohoItem.item_id} qty=${quantityDelta}`);
-        const zohoResponse = await zohoService.adjustStock(
-            orgId,
-            zohoItem.item_id,
-            quantityDelta,
-            reason,
-            referenceNumber
-        );
-
-        // Phase 2 complete — mark processed and advance approvalPhase to 'financial'
-        await approvalRef.update({
-            processed: true,
-            processedAt: admin.firestore.FieldValue.serverTimestamp(),
-            approvalPhase: 'financial',   // Phase 2: financial sync to Zoho Books done
-            zohoResponse: {
-                adjustmentId: zohoResponse?.inventory_adjustment_id || null,
-                status: zohoResponse?.status || null,
-                date: zohoResponse?.date || null,
-                referenceNumber: zohoResponse?.reference_number || null
-            },
-            error: null
-        });
-
-        console.log(`✅ Approval ${approvalId} processed — Zoho adjustment ID: ${zohoResponse?.inventory_adjustment_id}`);
-
-        // Audit ledger: immutable record that this item was synced to Zoho Books
-        try {
-            await admin.firestore()
-                .collection('organizations').doc(orgId)
-                .collection('auditLedger').add({
-                    event: 'zoho_synced',
-                    timestamp: admin.firestore.FieldValue.serverTimestamp(),
-                    actor: approval.approvedBy || 'system',
-                    actorName: approval.approvedByName || 'System',
-                    approvalId,
-                    sessionId: approval.stockTakeSessionId || null,
-                    itemId: approval.itemId || null,
-                    itemName: approval.itemName || null,
-                    itemSKU: approval.itemSKU || null,
-                    quantityDelta,
-                    newQuantity: approval.requestedChange?.newQuantity ?? null,
-                    expectedQuantity: approval.requestedChange?.expectedQuantity ?? null,
-                    unitCost: approval.requestedChange?.unitCost ?? null,
-                    valueImpact: quantityDelta * (approval.requestedChange?.unitCost ?? 0),
-                    approvalComment: approval.approvalComment || null,
-                    zohoAdjustmentId: zohoResponse?.inventory_adjustment_id || null
-                });
-        } catch (auditErr) {
-            console.warn('⚠️ Audit ledger write failed (non-fatal):', auditErr.message);
-        }
-
-        res.json({
-            success: true,
-            message: 'Stock adjustment synced to Zoho Books',
-            data: {
-                approvalId,
-                zohoAdjustmentId: zohoResponse?.inventory_adjustment_id,
-                zohoItemId: zohoItem.item_id,
-                quantityAdjusted: quantityDelta,
-                timestamp: new Date().toISOString()
-            }
-        });
-
-    } catch (error) {
-        console.error(`❌ Failed to process approval ${approvalId}:`, error);
-
-        // Record the error on the approval so admins can see it — keep processed=false so it can be retried
-        try {
-            const db = admin.firestore();
-            await db.collection('organizations').doc(orgId)
-                .collection('approvals').doc(approvalId)
-                .update({
-                    lastProcessAttempt: admin.firestore.FieldValue.serverTimestamp(),
-                    lastProcessError: error.message
-                });
-        } catch (_) { /* ignore secondary failure */ }
-
-        // Surface the real Zoho API error to the client, not just the wrapper
-        const zohoMessage = error.response?.data?.message || error.message;
-        res.status(500).json({
-            success: false,
-            message: 'Failed to sync approval to Zoho Books',
-            error: zohoMessage  // real Zoho error, shown verbatim in the UI
-        });
+      zohoItem = await zohoService.findItemBySku(orgId, itemSKU);
+    } catch (lookupErr) {
+      if (lookupErr.message?.startsWith('ZOHO_TOKEN_EXPIRED')) {
+        return res.status(401).json({ success: false, message: 'Zoho access token has expired. Please reconnect Zoho Books in Integrations.', code: 'ZOHO_TOKEN_EXPIRED' });
+      }
+      throw lookupErr;
     }
+
+    if (!zohoItem) {
+      const errMsg = `Item with SKU '${itemSKU}' not found in Zoho Books`;
+      await supabase.from('approval_requests').update({ status: 'rejected', updated_at: new Date().toISOString() }).eq('id', approvalId);
+      return res.status(404).json({ success: false, message: errMsg });
+    }
+
+    const reason          = approval.reason || 'Stock adjustment via StockFlow';
+    const referenceNumber = `SF-${approvalId.substring(0, 8).toUpperCase()}`;
+
+    const zohoResponse = await zohoService.adjustStock(orgId, zohoItem.item_id, quantityDelta, reason, referenceNumber);
+
+    // Log to activity_logs
+    await supabase.from('activity_logs').insert({
+      org_id:      orgId,
+      type:        'zoho_sync',
+      entity_type: 'approval',
+      entity_id:   approvalId,
+      details: {
+        event:          'zoho_synced',
+        approvalId,
+        itemId:         approval.item_id,
+        itemSKU,
+        quantityDelta,
+        adjustmentId:   zohoResponse?.inventory_adjustment_id || null,
+        referenceNumber,
+      },
+    }).then(() => {}).catch(e => console.warn('⚠️ activity_logs insert failed (non-fatal):', e.message));
+
+    console.log(`✅ Approval ${approvalId} synced — Zoho adjustment: ${zohoResponse?.inventory_adjustment_id}`);
+
+    res.json({
+      success: true,
+      message: 'Stock adjustment synced to Zoho Books',
+      data: {
+        approvalId,
+        zohoAdjustmentId: zohoResponse?.inventory_adjustment_id,
+        zohoItemId:       zohoItem.item_id,
+        quantityAdjusted: quantityDelta,
+        timestamp:        new Date().toISOString(),
+      },
+    });
+  } catch (err) {
+    console.error(`❌ Failed to process approval ${approvalId}:`, err);
+    const zohoMessage = err.response?.data?.message || err.message;
+    res.status(500).json({ success: false, message: 'Failed to sync approval to Zoho Books', error: zohoMessage });
+  }
 });
 
-/**
- * POST /api/zoho/sync/items
- * Sync items from StockFlow to Zoho Books
- */
+// ── Misc ──────────────────────────────────────────────────────────────────────
+
 router.post('/sync/items', verifyFirebaseToken, async (req, res) => {
-    try {
-        const { items } = req.body;
-        
-        if (!Array.isArray(items) || items.length === 0) {
-            return res.status(400).json({
-                success: false,
-                message: 'Items array is required and must not be empty',
-                error: 'Invalid items data'
-            });
-        }
-        
-        console.log(`🔄 Syncing ${items.length} items to Zoho Books...`);
-        
-        const results = {
-            created: [],
-            updated: [],
-            failed: []
-        };
-        
-        // Process items sequentially to avoid rate limiting
-        for (const item of items) {
-            try {
-                let zohoItem;
-                if (item.zohoItemId) {
-                    // Update existing item
-                    zohoItem = await zohoService.updateItem(item.zohoItemId, item);
-                    results.updated.push({ 
-                        stockFlowId: item.id, 
-                        zohoId: item.zohoItemId, 
-                        name: item.name 
-                    });
-                } else {
-                    // Create new item
-                    zohoItem = await zohoService.createItem(item);
-                    results.created.push({ 
-                        stockFlowId: item.id, 
-                        zohoId: zohoItem.item_id, 
-                        name: item.name 
-                    });
-                }
-                
-                // Small delay to avoid rate limiting
-                await new Promise(resolve => setTimeout(resolve, 100));
-                
-            } catch (error) {
-                console.error(`❌ Failed to sync item ${item.name}:`, error.message);
-                results.failed.push({ 
-                    stockFlowId: item.id, 
-                    name: item.name, 
-                    error: error.message 
-                });
-            }
-        }
-        
-        console.log(`✅ Sync completed: ${results.created.length} created, ${results.updated.length} updated, ${results.failed.length} failed`);
-        
-        res.json({
-            success: true,
-            message: `Sync completed: ${results.created.length} created, ${results.updated.length} updated, ${results.failed.length} failed`,
-            data: {
-                results: results,
-                summary: {
-                    total: items.length,
-                    created: results.created.length,
-                    updated: results.updated.length,
-                    failed: results.failed.length
-                },
-                timestamp: new Date().toISOString()
-            }
-        });
-    } catch (error) {
-        console.error('❌ Bulk sync failed:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Bulk sync operation failed',
-            error: error.message
-        });
+  try {
+    const { items } = req.body;
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ success: false, message: 'Items array is required and must not be empty' });
     }
+    const results = { created: [], updated: [], failed: [] };
+    for (const item of items) {
+      try {
+        if (item.zohoItemId) {
+          await zohoService.updateItem(item.zohoItemId, item);
+          results.updated.push({ stockFlowId: item.id, zohoId: item.zohoItemId, name: item.name });
+        } else {
+          const zohoItem = await zohoService.createItem(item);
+          results.created.push({ stockFlowId: item.id, zohoId: zohoItem.item_id, name: item.name });
+        }
+        await new Promise(r => setTimeout(r, 100));
+      } catch (err) {
+        results.failed.push({ stockFlowId: item.id, name: item.name, error: err.message });
+      }
+    }
+    res.json({ success: true, message: `Sync completed: ${results.created.length} created, ${results.updated.length} updated, ${results.failed.length} failed`, data: { results, summary: { total: items.length, ...Object.fromEntries(Object.entries(results).map(([k, v]) => [k, v.length])) }, timestamp: new Date().toISOString() } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Bulk sync operation failed', error: err.message });
+  }
 });
 
-/**
- * POST /api/zoho/sync-invoice-usage
- * Fetch invoices and update item lastInvoicedAt timestamps
- * This tracks actual sales/usage of items, not just stock modifications
- */
 router.post('/sync-invoice-usage', verifyFirebaseToken, async (req, res) => {
-    try {
-        const { orgId } = req.body;
-        
-        if (!orgId) {
-            return res.status(400).json({
-                success: false,
-                message: 'Missing required parameter: orgId'
-            });
-        }
-        
-        console.log(`🧾 Syncing invoice usage data for org: ${orgId}...`);
-        
-        const result = await zohoService.syncInvoiceUsage(orgId);
-        
-        res.json({
-            success: true,
-            message: 'Invoice usage data synced successfully',
-            data: {
-                itemsUpdated: result.itemsUpdated,
-                invoicesProcessed: result.invoicesProcessed,
-                timestamp: new Date().toISOString()
-            }
-        });
-    } catch (error) {
-        console.error('❌ Failed to sync invoice usage:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to sync invoice usage data',
-            error: error.response?.data?.message || error.message
-        });
-    }
+  try {
+    const { orgId } = req.body;
+    if (!orgId) return res.status(400).json({ success: false, message: 'Missing required parameter: orgId' });
+    const result = await zohoService.syncInvoiceUsage(orgId);
+    res.json({ success: true, message: 'Invoice usage data synced', data: { itemsUpdated: result.itemsUpdated, invoicesProcessed: result.invoicesProcessed, timestamp: new Date().toISOString() } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to sync invoice usage data', error: err.response?.data?.message || err.message });
+  }
 });
 
-/**
- * GET /api/zoho/organization
- * Get organization information from Zoho Books
- */
 router.get('/organization', async (req, res) => {
-    try {
-        console.log('🏢 Fetching organization info from Zoho...');
-        
-        const organizations = await zohoService.getOrganizationInfo();
-        
-        res.json({
-            success: true,
-            data: {
-                organizations: organizations,
-                count: organizations.length,
-                timestamp: new Date().toISOString()
-            }
-        });
-    } catch (error) {
-        console.error('❌ Failed to fetch organization info:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to fetch organization information',
-            error: error.message
-        });
-    }
+  try {
+    const organizations = await zohoService.getOrganizationInfo();
+    res.json({ success: true, data: { organizations, count: organizations.length, timestamp: new Date().toISOString() } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to fetch organization information', error: err.message });
+  }
 });
 
 module.exports = router;

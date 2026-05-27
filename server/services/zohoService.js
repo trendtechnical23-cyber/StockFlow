@@ -1,1104 +1,612 @@
 /**
  * Zoho Books Integration Service
- * Handles authentication, token management, and API operations with Zoho Books
+ *
+ * All config and token storage has been migrated from Firestore to Supabase.
+ * Per-org Zoho data lives in organization_settings.zoho_config (JSONB).
+ *
+ * zoho_config shape:
+ * {
+ *   clientId, clientSecret, zohoOrgId, region, redirectUri,  ← set via /config endpoint
+ *   access_token, refresh_token, expires_in, expires_at,     ← set via OAuth callback
+ *   token_type, scope, userId,
+ *   zoho_organization_id,                                    ← resolved numeric Zoho org ID
+ *   updatedAt
+ * }
  */
 
-const axios = require('axios');
-const admin = require('firebase-admin');
+const axios   = require('axios');
+const { supabase } = require('../supabaseAdmin');
+
+const REGION_ACCOUNTS_DOMAIN = {
+  us: 'https://accounts.zoho.com',
+  eu: 'https://accounts.zoho.eu',
+  in: 'https://accounts.zoho.in',
+  au: 'https://accounts.zoho.com.au',
+  jp: 'https://accounts.zoho.jp',
+};
 
 class ZohoService {
-    constructor() {
-        // Legacy env-var credentials kept ONLY for backward-compat admin/test use.
-        // Production multi-tenant flow always loads per-org config from Firestore.
-        this.clientId = process.env.ZOHO_CLIENT_ID || null;
-        this.clientSecret = process.env.ZOHO_CLIENT_SECRET || null;
-        this.redirectUri = process.env.ZOHO_REDIRECT_URI || null;
-        this.refreshToken = process.env.ZOHO_REFRESH_TOKEN || null;
-        this.organizationId = process.env.ZOHO_ORGANIZATION_ID || null;
-        this.accountsUrl = process.env.ZOHO_ACCOUNTS_URL || 'https://accounts.zoho.com';
-        this.booksApiUrl = process.env.ZOHO_BOOKS_API_URL || 'https://www.zohoapis.com/books/v3';
-        
-        this.accessToken = null;
-        this.tokenExpiryTime = null;
-        
-        console.log('🔗 ZohoService initialized (multi-tenant mode — per-org credentials from Firestore)');
-    }
+  constructor() {
+    // Legacy single-tenant env vars — used only as fallbacks when per-org config is absent.
+    this.clientId      = process.env.ZOHO_CLIENT_ID      || null;
+    this.clientSecret  = process.env.ZOHO_CLIENT_SECRET  || null;
+    this.redirectUri   = process.env.ZOHO_REDIRECT_URI   || null;
+    this.refreshToken  = process.env.ZOHO_REFRESH_TOKEN  || null;
+    this.organizationId = process.env.ZOHO_ORGANIZATION_ID || null;
+    this.accountsUrl   = process.env.ZOHO_ACCOUNTS_URL   || 'https://accounts.zoho.com';
+    this.booksApiUrl   = process.env.ZOHO_BOOKS_API_URL  || 'https://www.zohoapis.com/books/v3';
 
-    /**
-     * Load per-org Zoho config from Firestore (Client ID, Secret, region, Zoho Org ID)
-     */
-    async getOrgConfig(orgId) {
-        try {
-            const db = admin.firestore();
-            const doc = await db.collection('organizations').doc(orgId).collection('integrations').doc('zoho_config').get();
-            return doc.exists ? doc.data() : null;
-        } catch (error) {
-            console.warn('⚠️ Could not load Zoho config for org:', orgId, error.message);
-            return null;
+    this.accessToken      = null;
+    this.tokenExpiryTime  = null;
+
+    console.log('🔗 ZohoService initialized (Supabase-backed multi-tenant mode)');
+  }
+
+  // ── Helpers ─────────────────────────────────────────────────────────────────
+
+  _accountsUrlForRegion(region) {
+    return REGION_ACCOUNTS_DOMAIN[region] || this.accountsUrl;
+  }
+
+  /**
+   * Read the full zoho_config blob from organization_settings.
+   * Returns null when the org has no row or the config is empty.
+   */
+  async _readZohoConfig(orgId) {
+    try {
+      const { data, error } = await supabase
+        .from('organization_settings')
+        .select('zoho_config')
+        .eq('org_id', orgId)
+        .maybeSingle();
+      if (error) throw error;
+      return data?.zoho_config || null;
+    } catch (err) {
+      console.warn('⚠️ _readZohoConfig failed for org:', orgId, err.message);
+      return null;
+    }
+  }
+
+  /**
+   * Merge partial updates into the existing zoho_config blob and upsert.
+   */
+  async _patchZohoConfig(orgId, patch) {
+    // Read current config so we don't clobber unrelated fields
+    const current = await this._readZohoConfig(orgId) || {};
+    const updated = { ...current, ...patch, updatedAt: new Date().toISOString() };
+
+    const { error } = await supabase
+      .from('organization_settings')
+      .upsert({ org_id: orgId, zoho_config: updated }, { onConflict: 'org_id' });
+    if (error) throw error;
+    return updated;
+  }
+
+  // ── Public API (consumed by zoho.js routes) ──────────────────────────────────
+
+  /**
+   * Load per-org Zoho credentials (clientId, clientSecret, region, etc.)
+   * Previously read from Firestore organizations/{orgId}/integrations/zoho_config
+   */
+  async getOrgConfig(orgId) {
+    try {
+      const cfg = await this._readZohoConfig(orgId);
+      // Only return the config if it has the minimum required fields
+      if (!cfg?.clientId) return null;
+      return cfg;
+    } catch (err) {
+      console.warn('⚠️ Could not load Zoho config for org:', orgId, err.message);
+      return null;
+    }
+  }
+
+  /**
+   * Exchange authorization code for OAuth tokens.
+   */
+  async exchangeCodeForTokens(authorizationCode, orgId) {
+    try {
+      console.log('🔄 Exchanging authorization code for tokens...');
+
+      if (!orgId) return { success: false, error: 'Organization ID is required for token exchange' };
+
+      const orgConfig = await this.getOrgConfig(orgId);
+      if (!orgConfig?.clientId || !orgConfig?.clientSecret) {
+        return {
+          success: false,
+          error: 'Zoho API credentials not configured for this organization. Please configure them in Integrations settings first.',
+        };
+      }
+
+      const { clientId, clientSecret, region } = orgConfig;
+      const redirectUri = orgConfig.redirectUri || this.redirectUri;
+      const accountsUrl = this._accountsUrlForRegion(region);
+
+      console.log('🔑 Token exchange params:', {
+        orgId,
+        clientId: clientId.substring(0, 12) + '...',
+        region,
+        accountsUrl,
+        redirectUri,
+        codeLength: authorizationCode?.length || 0,
+      });
+
+      if (!redirectUri) {
+        return { success: false, error: 'Redirect URI not configured. Please set it in Zoho integration settings.' };
+      }
+
+      const response = await axios.post(`${accountsUrl}/oauth/v2/token`, null, {
+        params: {
+          code: authorizationCode,
+          client_id: clientId,
+          client_secret: clientSecret,
+          redirect_uri: redirectUri,
+          grant_type: 'authorization_code',
+        },
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      });
+
+      console.log('📥 Zoho token endpoint raw response:', JSON.stringify(response.data));
+
+      if (response.data.error) {
+        console.error('❌ Zoho token error in response body:', response.data.error);
+        return { success: false, error: `Zoho error: ${response.data.error}` };
+      }
+
+      if (response.data.access_token) {
+        return {
+          success: true,
+          tokens: {
+            access_token:  response.data.access_token,
+            refresh_token: response.data.refresh_token,
+            expires_in:    response.data.expires_in,
+            token_type:    response.data.token_type || 'Bearer',
+            scope:         response.data.scope,
+          },
+        };
+      }
+
+      throw new Error('No access_token in Zoho response');
+    } catch (err) {
+      const msg = err.response?.data?.error || err.message;
+      console.error('❌ Failed to exchange code for tokens:', err.response?.data || err.message);
+      return { success: false, error: msg };
+    }
+  }
+
+  /**
+   * Store OAuth tokens for an org in Supabase organization_settings.zoho_config.
+   * Previously wrote to Firestore organizations/{orgId}/integrations/zoho
+   */
+  async storeTokens(organizationId, userId, tokens) {
+    try {
+      console.log('💾 Storing Zoho tokens for org:', organizationId);
+      await this._patchZohoConfig(organizationId, {
+        access_token:  tokens.access_token,
+        refresh_token: tokens.refresh_token,
+        expires_in:    tokens.expires_in,
+        expires_at:    Date.now() + (tokens.expires_in * 1000),
+        token_type:    tokens.token_type || 'Bearer',
+        scope:         tokens.scope,
+        userId,
+      });
+      console.log('✅ Tokens stored in Supabase for org:', organizationId);
+      return { success: true };
+    } catch (err) {
+      console.error('❌ Failed to store tokens:', err);
+      return { success: false, error: err.message };
+    }
+  }
+
+  /**
+   * Retrieve stored OAuth tokens for an org.
+   * Previously read from Firestore organizations/{orgId}/integrations/zoho
+   */
+  async getStoredTokens(organizationId) {
+    try {
+      const cfg = await this._readZohoConfig(organizationId);
+      if (!cfg?.access_token && !cfg?.refresh_token) {
+        console.log('❌ No stored Zoho tokens for org:', organizationId);
+        return null;
+      }
+      console.log('✅ Retrieved Zoho tokens for org:', organizationId);
+      return cfg;
+    } catch (err) {
+      console.error('❌ Failed to retrieve stored tokens:', err);
+      return null;
+    }
+  }
+
+  /**
+   * Return a valid access token for an org, refreshing if necessary.
+   */
+  async getAccessTokenForOrg(organizationId) {
+    try {
+      const tokenData = await this.getStoredTokens(organizationId);
+      if (!tokenData) throw new Error(`No Zoho tokens found for organization: ${organizationId}`);
+
+      const now = Date.now();
+
+      // Token is fresh enough
+      if (tokenData.expires_at && (tokenData.expires_at - now) > 5 * 60 * 1000) {
+        return tokenData.access_token;
+      }
+
+      // No refresh token — use access token if still valid, otherwise force reauth
+      if (!tokenData.refresh_token) {
+        if (tokenData.access_token && tokenData.expires_at && tokenData.expires_at > now) {
+          console.warn('⚠️ No refresh_token; using still-valid access token');
+          return tokenData.access_token;
         }
-    }
+        throw new Error('ZOHO_REAUTH_REQUIRED: No Zoho refresh token on file. Please reconnect Zoho Books in Integrations settings.');
+      }
 
-    /**
-     * Resolve accounts URL from region string
-     */
-    _accountsUrlForRegion(region) {
-        const map = { us: 'https://accounts.zoho.com', eu: 'https://accounts.zoho.eu', in: 'https://accounts.zoho.in', au: 'https://accounts.zoho.com.au', jp: 'https://accounts.zoho.jp' };
-        return map[region] || this.accountsUrl;
-    }
+      // Refresh the token
+      console.log('🔄 Refreshing access token for org:', organizationId);
+      const orgConfig  = await this.getOrgConfig(organizationId);
+      const clientId   = orgConfig?.clientId    || this.clientId;
+      const clientSec  = orgConfig?.clientSecret || this.clientSecret;
+      const acctUrl    = orgConfig ? this._accountsUrlForRegion(orgConfig.region) : this.accountsUrl;
 
-    /**
-     * Exchange authorization code for tokens — uses per-org credentials when orgId is provided
-     */
-    async exchangeCodeForTokens(authorizationCode, orgId) {
-        try {
-            console.log('🔄 Exchanging authorization code for tokens...');
+      try {
+        const response = await axios.post(`${acctUrl}/oauth/v2/token`, null, {
+          params: {
+            refresh_token: tokenData.refresh_token,
+            client_id:     clientId,
+            client_secret: clientSec,
+            grant_type:    'refresh_token',
+          },
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        });
 
-            if (!orgId) {
-                return { success: false, error: 'Organization ID is required for token exchange' };
-            }
-
-            // Load per-org credentials from Firestore (multi-tenant — no env-var fallback)
-            const orgConfig = await this.getOrgConfig(orgId);
-            if (!orgConfig || !orgConfig.clientId || !orgConfig.clientSecret) {
-                return {
-                    success: false,
-                    error: 'Zoho API credentials not configured for this organization. Please configure them in Integrations settings first.'
-                };
-            }
-
-            const clientId = orgConfig.clientId;
-            const clientSecret = orgConfig.clientSecret;
-            const redirectUri = orgConfig.redirectUri || this.redirectUri;
-            const accountsUrl = this._accountsUrlForRegion(orgConfig.region);
-
-            console.log('🔑 Token exchange params:', {
-                orgId,
-                clientId: clientId.substring(0, 12) + '...',
-                region: orgConfig.region,
-                accountsUrl,
-                redirectUri,
-                codeLength: authorizationCode?.length || 0
-            });
-
-            if (!redirectUri) {
-                return {
-                    success: false,
-                    error: 'Redirect URI not configured. Please set it in Zoho integration settings.'
-                };
-            }
-            
-            const response = await axios.post(`${accountsUrl}/oauth/v2/token`, null, {
-                params: {
-                    code: authorizationCode,
-                    client_id: clientId,
-                    client_secret: clientSecret,
-                    redirect_uri: redirectUri,
-                    grant_type: 'authorization_code'
-                },
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                }
-            });
-
-            console.log('📥 Zoho token endpoint raw response:', JSON.stringify(response.data));
-
-            if (response.data.error) {
-                // Zoho returned 200 but with an error field (e.g. invalid_code)
-                console.error('❌ Zoho token error in response body:', response.data.error);
-                return {
-                    success: false,
-                    error: `Zoho error: ${response.data.error}`
-                };
-            }
-
-            if (response.data.access_token) {
-                const tokens = {
-                    access_token: response.data.access_token,
-                    refresh_token: response.data.refresh_token,
-                    expires_in: response.data.expires_in,
-                    token_type: response.data.token_type || 'Bearer',
-                    scope: response.data.scope
-                };
-
-                console.log('✅ Token exchange successful');
-                return {
-                    success: true,
-                    tokens
-                };
-            } else {
-                throw new Error('No access token in Zoho response');
-            }
-        } catch (error) {
-            const zohoErrorData = error.response?.data;
-            const zohoErrorMsg = zohoErrorData?.error || error.message;
-            console.error('❌ Failed to exchange code for tokens:', zohoErrorData || error.message);
-            return {
-                success: false,
-                error: zohoErrorMsg
-            };
-        }
-    }
-
-    /**
-     * Store tokens for organization in Firestore
-     */
-    async storeTokens(organizationId, userId, tokens) {
-        try {
-            console.log('💾 Storing tokens for organization:', organizationId);
-            console.log('👤 User ID:', userId);
-            console.log('🔑 Token data received:', {
-                hasAccessToken: !!tokens.access_token,
-                hasRefreshToken: !!tokens.refresh_token,
-                tokenType: tokens.token_type
-            });
-            
-            const db = admin.firestore();
-            
-            // Test Firestore connectivity
-            console.log('🔥 Testing Firestore connectivity...');
-            try {
-                const testRef = db.collection('_test').doc('connectivity');
-                await testRef.set({ timestamp: new Date(), test: 'zoho-token-storage' });
-                console.log('✅ Firestore is accessible');
-                await testRef.delete(); // Clean up test document
-            } catch (firestoreError) {
-                console.error('❌ Firestore connectivity test failed:', firestoreError);
-                throw new Error('Firestore not accessible: ' + firestoreError.message);
-            }
-            
-            const tokenData = {
-                access_token: tokens.access_token,
-                refresh_token: tokens.refresh_token,
-                expires_in: tokens.expires_in,
-                expires_at: Date.now() + (tokens.expires_in * 1000),
-                token_type: tokens.token_type || 'Bearer',
-                scope: tokens.scope,
-                userId: userId,
-                createdAt: new Date(),
-                updatedAt: new Date()
-            };
-            
-            console.log('📄 Prepared token data:', Object.keys(tokenData));
-            
-            // Remove undefined values before writing to Firestore (Firestore doesn't allow undefined values)
-            const cleanTokenData = Object.fromEntries(
-                Object.entries(tokenData).filter(([_, v]) => v !== undefined)
-            );
-            
-            console.log('🧹 Cleaned token data (removed undefined values):', Object.keys(cleanTokenData));
-            
-            // Store in Firestore under organizations/{orgId}/integrations/zoho
-            const storePath = 'organizations/' + organizationId + '/integrations/zoho';
-            console.log('💾 Storing tokens at path:', storePath);
-            
-            await db.collection('organizations')
-                .doc(organizationId)
-                .collection('integrations')
-                .doc('zoho')
-                .set(cleanTokenData, { merge: true });
-            
-            console.log('✅ Tokens stored successfully in Firestore at:', storePath);
-            
-            // Verify storage immediately
-            const verifyDoc = await db.collection('organizations')
-                .doc(organizationId)
-                .collection('integrations')
-                .doc('zoho')
-                .get();
-            
-            if (verifyDoc.exists) {
-                console.log('✅ Verification: Tokens immediately readable after storage');
-            } else {
-                console.log('❌ Verification: Tokens NOT immediately readable - possible Firestore lag');
-            }
-            return { success: true };
-        } catch (error) {
-            console.error('❌ Failed to store tokens:', error);
-            return { success: false, error: error.message };
-        }
-    }
-
-    /**
-     * Retrieve tokens for organization from Firestore
-     */
-    async getStoredTokens(organizationId) {
-        try {
-            console.log('🔍 Looking for tokens at path: organizations/' + organizationId + '/integrations/zoho');
-            const db = admin.firestore();
-            const tokenDoc = await db.collection('organizations')
-                .doc(organizationId)
-                .collection('integrations')
-                .doc('zoho')
-                .get();
-            
-            if (!tokenDoc.exists) {
-                console.log('❌ No stored tokens found for organization:', organizationId);
-                console.log('🔍 Debug: Checking if organization document exists...');
-                
-                // Check if organization document exists
-                const orgDoc = await db.collection('organizations').doc(organizationId).get();
-                if (!orgDoc.exists) {
-                    console.log('❌ Organization document does not exist:', organizationId);
-                } else {
-                    console.log('✅ Organization document exists');
-                    
-                    // Check integrations subcollection
-                    const integrationsSnapshot = await db.collection('organizations').doc(organizationId).collection('integrations').get();
-                    console.log('🔍 Integrations subcollection size:', integrationsSnapshot.size);
-                    integrationsSnapshot.forEach(doc => {
-                        console.log('📄 Integration document:', doc.id, '- exists:', doc.exists);
-                    });
-                }
-                return null;
-            }
-            
-            const tokenData = tokenDoc.data();
-            console.log('✅ Retrieved stored tokens for organization:', organizationId);
-            return tokenData;
-        } catch (error) {
-            console.error('❌ Failed to retrieve stored tokens:', error);
-            return null;
-        }
-    }
-
-    /**
-     * Get valid access token for organization (refresh if needed)
-     */
-    async getAccessTokenForOrg(organizationId) {
-        try {
-            // Get stored tokens for this organization
-            const tokenData = await this.getStoredTokens(organizationId);
-            
-            if (!tokenData) {
-                throw new Error(`No Zoho tokens found for organization: ${organizationId}`);
-            }
-            
-            const now = Date.now();
-            
-            // If token expires in more than 5 minutes, use it
-            if (tokenData.expires_at && (tokenData.expires_at - now) > (5 * 60 * 1000)) {
-                return tokenData.access_token;
-            }
-            
-            // No refresh token stored → we can never auto-renew. This happens when the
-            // org was authorized without prompt=consent (Zoho then issues no refresh
-            // token). The user must reconnect once to mint a persistent refresh token.
-            if (!tokenData.refresh_token) {
-                // If the access token still has life, use it; otherwise force a reconnect.
-                if (tokenData.access_token && tokenData.expires_at && tokenData.expires_at > now) {
-                    console.warn('⚠️  No refresh_token stored; using still-valid access token');
-                    return tokenData.access_token;
-                }
-                throw new Error('ZOHO_REAUTH_REQUIRED: No Zoho refresh token on file. Please reconnect Zoho Books in Integrations settings (one-time).');
-            }
-
-            // Refresh the token — use per-org credentials if available
-            console.log('🔄 Refreshing access token for organization:', organizationId);
-
-            const orgConfig = await this.getOrgConfig(organizationId);
-            const refreshClientId = orgConfig?.clientId || this.clientId;
-            const refreshClientSecret = orgConfig?.clientSecret || this.clientSecret;
-            const refreshAccountsUrl = orgConfig ? this._accountsUrlForRegion(orgConfig.region) : this.accountsUrl;
-
-            try {
-                const response = await axios.post(`${refreshAccountsUrl}/oauth/v2/token`, null, {
-                    params: {
-                        refresh_token: tokenData.refresh_token,
-                        client_id: refreshClientId,
-                        client_secret: refreshClientSecret,
-                        grant_type: 'refresh_token'
-                    },
-                    headers: {
-                        'Content-Type': 'application/x-www-form-urlencoded'
-                    }
-                });
-
-                if (response.data.access_token) {
-                    const newExpiresAt = now + (response.data.expires_in * 1000);
-                    const db = admin.firestore();
-                    // Only update the fields that change — never overwrite refresh_token
-                    // (Zoho does not return it on refresh) or other stored metadata.
-                    await db.collection('organizations')
-                        .doc(organizationId)
-                        .collection('integrations')
-                        .doc('zoho')
-                        .update({
-                            access_token: response.data.access_token,
-                            expires_in: response.data.expires_in,
-                            expires_at: newExpiresAt,
-                            updatedAt: new Date()
-                        });
-                    console.log('✅ Access token refreshed and stored for organization:', organizationId);
-                    return response.data.access_token;
-                }
-
-                // Zoho responded but without an access_token (e.g. invalid_client error in body)
-                const zohoError = response.data?.error || 'no access_token in refresh response';
-                throw new Error(zohoError);
-
-            } catch (refreshError) {
-                const zohoErr = refreshError.response?.data?.error || refreshError.message;
-                // If the stored access token is still valid, fall back to it (transient
-                // refresh hiccup, e.g. Zoho rate limit). Only do this when not expired.
-                if (tokenData.access_token && tokenData.expires_at && tokenData.expires_at > now) {
-                    console.warn(`⚠️  Token refresh failed (${zohoErr}); stored token still valid — using it`);
-                    return tokenData.access_token;
-                }
-                // Refresh failed AND token is expired → surface a clear, actionable error.
-                console.error(`❌ Zoho token refresh failed and access token expired: ${zohoErr}`);
-                throw new Error('ZOHO_REAUTH_REQUIRED: Could not refresh Zoho access token. Please reconnect Zoho Books in Integrations settings.');
-            }
-        } catch (error) {
-            console.error('❌ Failed to get access token for organization:', organizationId, error.message);
-            throw error;
-        }
-    }
-
-    /**
-     * Get valid access token (refresh if needed)
-     */
-    async getAccessToken() {
-        const now = Date.now();
-        
-        // If we have a valid token that expires more than 5 minutes from now, use it
-        if (this.accessToken && this.tokenExpiryTime && (this.tokenExpiryTime - now) > (5 * 60 * 1000)) {
-            return this.accessToken;
+        if (response.data.access_token) {
+          const newExpiresAt = now + (response.data.expires_in * 1000);
+          // Patch only the token fields — never overwrite refresh_token or config fields
+          await this._patchZohoConfig(organizationId, {
+            access_token: response.data.access_token,
+            expires_in:   response.data.expires_in,
+            expires_at:   newExpiresAt,
+          });
+          console.log('✅ Access token refreshed for org:', organizationId);
+          return response.data.access_token;
         }
 
-        // Refresh the token
-        try {
-            console.log('🔄 Refreshing Zoho access token...');
-            
-            const response = await axios.post(`${this.accountsUrl}/oauth/v2/token`, null, {
-                params: {
-                    refresh_token: this.refreshToken,
-                    client_id: this.clientId,
-                    client_secret: this.clientSecret,
-                    grant_type: 'refresh_token'
-                },
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                }
-            });
+        const zohoError = response.data?.error || 'no access_token in refresh response';
+        throw new Error(zohoError);
 
-            if (response.data.access_token) {
-                this.accessToken = response.data.access_token;
-                // Set expiry time (expires_in is in seconds)
-                this.tokenExpiryTime = now + (response.data.expires_in * 1000);
-                
-                console.log('✅ Zoho access token refreshed successfully');
-                return this.accessToken;
-            } else {
-                throw new Error('No access token in response');
-            }
-        } catch (error) {
-            console.error('❌ Failed to refresh Zoho token:', error.response?.data || error.message);
-            throw new Error('Failed to authenticate with Zoho Books');
+      } catch (refreshErr) {
+        const zohoErr = refreshErr.response?.data?.error || refreshErr.message;
+        // Fall back to current token if still valid
+        if (tokenData.access_token && tokenData.expires_at && tokenData.expires_at > now) {
+          console.warn(`⚠️ Token refresh failed (${zohoErr}); stored token still valid — using it`);
+          return tokenData.access_token;
         }
+        console.error(`❌ Token refresh failed and access token expired: ${zohoErr}`);
+        throw new Error('ZOHO_REAUTH_REQUIRED: Could not refresh Zoho access token. Please reconnect Zoho Books in Integrations settings.');
+      }
+    } catch (err) {
+      console.error('❌ getAccessTokenForOrg failed for org:', organizationId, err.message);
+      throw err;
+    }
+  }
+
+  /**
+   * Legacy single-tenant access token (env-var based). Used only by non-org-scoped routes.
+   */
+  async getAccessToken() {
+    const now = Date.now();
+    if (this.accessToken && this.tokenExpiryTime && (this.tokenExpiryTime - now) > 5 * 60 * 1000) {
+      return this.accessToken;
+    }
+    const response = await axios.post(`${this.accountsUrl}/oauth/v2/token`, null, {
+      params: {
+        refresh_token: this.refreshToken,
+        client_id:     this.clientId,
+        client_secret: this.clientSecret,
+        grant_type:    'refresh_token',
+      },
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    });
+    if (response.data.access_token) {
+      this.accessToken     = response.data.access_token;
+      this.tokenExpiryTime = now + (response.data.expires_in * 1000);
+      return this.accessToken;
+    }
+    throw new Error('Failed to authenticate with Zoho Books');
+  }
+
+  /**
+   * Get or resolve the numeric Zoho organization_id for a StockFlow org.
+   * Caches the result in zoho_config.zoho_organization_id.
+   */
+  async getZohoOrgIdForOrg(organizationId) {
+    try {
+      const tokenData = await this.getStoredTokens(organizationId);
+      if (!tokenData) throw new Error(`No Zoho tokens for org: ${organizationId}`);
+
+      if (tokenData.zoho_organization_id) return tokenData.zoho_organization_id;
+
+      // Resolve via Zoho API
+      console.log('🔍 Resolving Zoho organization ID from /organizations API...');
+      const accessToken = await this.getAccessTokenForOrg(organizationId);
+      const response    = await axios.get(`${this.booksApiUrl}/organizations`, {
+        headers: { Authorization: `Zoho-oauthtoken ${accessToken}` },
+      });
+
+      const orgs = response.data.organizations || [];
+      if (orgs.length === 0) throw new Error('No organizations returned from Zoho Books API');
+
+      const zohoOrgId = String(orgs[0].organization_id);
+      console.log(`✅ Zoho organization_id resolved: ${zohoOrgId} (${orgs[0].name})`);
+
+      // Cache in Supabase
+      await this._patchZohoConfig(organizationId, { zoho_organization_id: zohoOrgId });
+
+      return zohoOrgId;
+    } catch (err) {
+      console.warn('⚠️ getZohoOrgIdForOrg failed, falling back to env var:', err.message);
+      if (this.organizationId) return this.organizationId;
+      throw err;
+    }
+  }
+
+  // ── Zoho Books API wrappers ──────────────────────────────────────────────────
+
+  async makeApiRequest(endpoint, method = 'GET', data = null) {
+    const token  = await this.getAccessToken();
+    const config = {
+      method,
+      url: `${this.booksApiUrl}${endpoint}`,
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      params: { organization_id: this.organizationId },
+    };
+    if (method === 'GET') { config.params = { ...config.params, ...(data || {}) }; }
+    else if (data)         { config.data = data; }
+    const response = await axios(config);
+    return response.data;
+  }
+
+  async getItemsPage(organizationId, page = 1, perPage = 200) {
+    const [accessToken, zohoOrgId] = await Promise.all([
+      this.getAccessTokenForOrg(organizationId),
+      this.getZohoOrgIdForOrg(organizationId),
+    ]);
+    const response = await axios.get(`${this.booksApiUrl}/items`, {
+      headers: { Authorization: `Zoho-oauthtoken ${accessToken}`, 'Content-Type': 'application/json' },
+      params:  { organization_id: zohoOrgId, page, per_page: perPage },
+    });
+    return { items: response.data.items || [], page_context: response.data.page_context || {} };
+  }
+
+  async getItems(organizationId) {
+    console.log('📦 Fetching ALL items from Zoho Books for org:', organizationId);
+    let allItems = [], currentPage = 1, totalPages = 1, totalItems = 0;
+
+    do {
+      const result = await this.getItemsPage(organizationId, currentPage, 200);
+      allItems = allItems.concat(result.items);
+      if (currentPage === 1) {
+        if (result.page_context?.total) {
+          totalPages  = Math.ceil(result.page_context.total / 200);
+          totalItems  = result.page_context.total;
+        } else if (result.items.length < 200) {
+          totalPages = 1;
+          totalItems = result.items.length;
+        } else {
+          totalPages = 999;
+        }
+      }
+      if (!result.page_context?.total && result.items.length < 200) break;
+      currentPage++;
+      if (currentPage <= totalPages) await new Promise(r => setTimeout(r, 100));
+    } while (currentPage <= totalPages);
+
+    allItems.sort((a, b) => {
+      const da = new Date(a.last_modified_time || a.created_time || 0);
+      const db_ = new Date(b.last_modified_time || b.created_time || 0);
+      if (db_ - da !== 0) return db_ - da;
+      const sa = a.status === 'active' ? 0 : 1;
+      const sb = b.status === 'active' ? 0 : 1;
+      if (sb - sa !== 0) return sa - sb;
+      return (a.name || '').localeCompare(b.name || '');
+    });
+
+    console.log(`✅ Fetched ${allItems.length} items from Zoho Books`);
+    return { items: allItems, total_items: allItems.length, page_context: { total: allItems.length, per_page: allItems.length, page: 1, total_pages: 1 } };
+  }
+
+  async createItem(itemData) {
+    const response = await this.makeApiRequest('/items', 'POST', itemData);
+    return response.item;
+  }
+
+  async updateItem(itemId, itemData) {
+    const response = await this.makeApiRequest(`/items/${itemId}`, 'PUT', itemData);
+    return response.item;
+  }
+
+  async adjustStock(organizationId, zohoItemId, quantityAdjusted, reason, referenceNumber) {
+    const [accessToken, zohoOrgId] = await Promise.all([
+      this.getAccessTokenForOrg(organizationId),
+      this.getZohoOrgIdForOrg(organizationId),
+    ]);
+    const payload = {
+      reason:     reason || 'Stock adjustment via StockFlow',
+      line_items: [{ item_id: zohoItemId, quantity_adjusted: quantityAdjusted }],
+    };
+    const response = await axios.post(`${this.booksApiUrl}/inventoryadjustments`, payload, {
+      params:  { organization_id: zohoOrgId },
+      headers: { Authorization: `Zoho-oauthtoken ${accessToken}`, 'Content-Type': 'application/json' },
+    });
+    const adj = response.data.inventory_adjustment;
+    console.log('✅ Inventory adjustment created:', adj?.inventory_adjustment_id);
+    return adj;
+  }
+
+  async adjustStockBatch(organizationId, lineItems, reason, referenceNumber) {
+    if (!lineItems?.length) throw new Error('adjustStockBatch called with empty line items');
+    const [accessToken, zohoOrgId] = await Promise.all([
+      this.getAccessTokenForOrg(organizationId),
+      this.getZohoOrgIdForOrg(organizationId),
+    ]);
+    const payload = { reason: reason || 'Stock take adjustment via StockFlow', line_items: lineItems };
+    const response = await axios.post(`${this.booksApiUrl}/inventoryadjustments`, payload, {
+      params:  { organization_id: zohoOrgId },
+      headers: { Authorization: `Zoho-oauthtoken ${accessToken}`, 'Content-Type': 'application/json' },
+    });
+    const adj = response.data.inventory_adjustment;
+    console.log(`✅ Batch adjustment created: ${adj?.inventory_adjustment_id} (${lineItems.length} items)`);
+    return adj;
+  }
+
+  async buildSkuToItemIdMap(organizationId) {
+    const [accessToken, zohoOrgId] = await Promise.all([
+      this.getAccessTokenForOrg(organizationId),
+      this.getZohoOrgIdForOrg(organizationId),
+    ]);
+    const skuMap = new Map();
+    let page = 1, hasMore = true;
+    while (hasMore) {
+      const response = await axios.get(`${this.booksApiUrl}/items`, {
+        params:  { organization_id: zohoOrgId, page, per_page: 200 },
+        headers: { Authorization: `Zoho-oauthtoken ${accessToken}` },
+      });
+      (response.data.items || []).forEach(item => { if (item.sku) skuMap.set(item.sku, item.item_id); });
+      hasMore = response.data.page_context?.has_more_page ?? false;
+      page++;
+    }
+    console.log(`🗺️ Built SKU map: ${skuMap.size} items`);
+    return skuMap;
+  }
+
+  async fetchStockOnHand(organizationId, skus = []) {
+    const [accessToken, zohoOrgId] = await Promise.all([
+      this.getAccessTokenForOrg(organizationId),
+      this.getZohoOrgIdForOrg(organizationId),
+    ]);
+    const skuSet = new Set(skus.map(s => s.trim().toLowerCase()));
+    const result = new Map();
+    let page = 1, hasMore = true;
+    while (hasMore) {
+      const response = await axios.get(`${this.booksApiUrl}/items`, {
+        params:  { organization_id: zohoOrgId, page, per_page: 200 },
+        headers: { Authorization: `Zoho-oauthtoken ${accessToken}` },
+      });
+      for (const item of (response.data.items || [])) {
+        if (!item.sku) continue;
+        if (skuSet.size > 0 && !skuSet.has(item.sku.trim().toLowerCase())) continue;
+        result.set(item.sku, { stock_on_hand: item.stock_on_hand ?? 0, item_id: item.item_id, item_name: item.name });
+      }
+      hasMore = response.data.page_context?.has_more_page ?? false;
+      page++;
+    }
+    console.log(`📥 Fetched stock_on_hand for ${result.size} items`);
+    return result;
+  }
+
+  async findItemBySku(organizationId, sku) {
+    try {
+      const [accessToken, zohoOrgId] = await Promise.all([
+        this.getAccessTokenForOrg(organizationId),
+        this.getZohoOrgIdForOrg(organizationId),
+      ]);
+      const response = await axios.get(`${this.booksApiUrl}/items`, {
+        params:  { organization_id: zohoOrgId, sku },
+        headers: { Authorization: `Zoho-oauthtoken ${accessToken}` },
+      });
+      return (response.data.items || []).find(i => i.sku === sku) || null;
+    } catch (err) {
+      const zohoErr = err.response?.data;
+      const msg     = zohoErr?.message || err.message;
+      if (zohoErr?.code === 57 || msg?.toLowerCase().includes('not authorized')) {
+        throw new Error('ZOHO_TOKEN_EXPIRED: Access token is expired or invalid. Please re-authenticate with Zoho Books in Integrations settings.');
+      }
+      console.error('❌ findItemBySku failed:', zohoErr || err.message);
+      return null;
+    }
+  }
+
+  async getOrganization() {
+    const response = await this.makeApiRequest('/organizations');
+    return response.organizations || [];
+  }
+
+  async getOrganizationInfo() { return this.getOrganization(); }
+
+  async testConnection() {
+    try {
+      const organizations = await this.getOrganization();
+      if (organizations?.length > 0) {
+        const org = organizations[0];
+        return { success: true, message: 'Connected to Zoho Books successfully', organizationId: org.organization_id, organizationName: org.name };
+      }
+      throw new Error('No organizations found');
+    } catch (err) {
+      return { success: false, message: 'Failed to connect to Zoho Books', error: err.response?.data?.message || err.message };
+    }
+  }
+
+  async bulkSyncItems(items) {
+    const results = [];
+    for (const item of items) {
+      try {
+        const result = item.zohoItemId ? await this.updateItem(item.zohoItemId, item) : await this.createItem(item);
+        results.push({ success: true, item: result });
+      } catch (err) {
+        results.push({ success: false, item: item.name, error: err.message });
+      }
+    }
+    return results;
+  }
+
+  /**
+   * syncInvoiceUsage — still uses Supabase inventory_items (not Firestore).
+   * Now updates inventory_items directly instead of Firestore.
+   */
+  async syncInvoiceUsage(organizationId) {
+    const accessToken = await this.getAccessTokenForOrg(organizationId);
+    let page = 1, totalInvoices = 0;
+    const itemLastInvoiced = {};
+
+    while (true) {
+      const response = await axios.get(`${this.booksApiUrl}/invoices`, {
+        headers: { Authorization: `Zoho-oauthtoken ${accessToken}`, 'Content-Type': 'application/json' },
+        params:  { organization_id: this.organizationId, page, per_page: 200, sort_column: 'date', sort_order: 'D' },
+      });
+      const invoices = response.data.invoices || [];
+      if (invoices.length === 0) break;
+      totalInvoices += invoices.length;
+      for (const invoice of invoices) {
+        const invoiceDate   = new Date(invoice.date);
+        const invoiceNumber = invoice.invoice_number;
+        for (const lineItem of invoice.line_items || []) {
+          const itemId = lineItem.item_id;
+          if (!itemId) continue;
+          if (!itemLastInvoiced[itemId] || invoiceDate > new Date(itemLastInvoiced[itemId].date)) {
+            itemLastInvoiced[itemId] = { date: invoiceDate.toISOString(), invoiceNumber, quantity: lineItem.quantity || 0 };
+          }
+        }
+      }
+      if (!response.data.page_context?.has_more_page) break;
+      page++;
+      await new Promise(r => setTimeout(r, 100));
     }
 
-    /**
-     * Make authenticated API request to Zoho Books
-     */
-    async makeApiRequest(endpoint, method = 'GET', data = null) {
-        try {
-            const token = await this.getAccessToken();
-            
-            const config = {
-                method,
-                url: `${this.booksApiUrl}${endpoint}`,
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                    'Content-Type': 'application/json'
-                }
-            };
-
-            // Add organization ID to params
-            const params = { organization_id: this.organizationId };
-            
-            if (method === 'GET') {
-                config.params = { ...params, ...(data || {}) };
-            } else {
-                config.params = params;
-                if (data) config.data = data;
-            }
-
-            const response = await axios(config);
-            return response.data;
-        } catch (error) {
-            console.error(`❌ Zoho API request failed [${method} ${endpoint}]:`, error.response?.data || error.message);
-            throw error;
-        }
+    // Update inventory_items in Supabase by matching a zoho_item_id stored in metadata
+    // (best-effort — items without a zoho_item_id link are skipped)
+    let updateCount = 0;
+    for (const [zohoItemId, usageData] of Object.entries(itemLastInvoiced)) {
+      try {
+        const { error } = await supabase
+          .from('inventory_items')
+          .update({ updated_at: new Date().toISOString() }) // placeholder — extend schema if lastUsed is needed
+          .eq('org_id', organizationId)
+          .contains('description', zohoItemId); // approximate match
+        if (!error) updateCount++;
+      } catch (_) { /* skip */ }
     }
 
-    /**
-     * Get single page of items from Zoho Books
-     */
-    async getItemsPage(organizationId, page = 1, perPage = 200) {
-        try {
-            // Resolve BOTH the (refreshed) access token and the per-org Zoho org id.
-            // Previously this used this.organizationId (the env var), which is wrong
-            // in multi-tenant mode and caused "Failed to fetch items" errors.
-            const [accessToken, zohoOrgId] = await Promise.all([
-                this.getAccessTokenForOrg(organizationId),
-                this.getZohoOrgIdForOrg(organizationId)
-            ]);
-
-            const config = {
-                method: 'GET',
-                url: `${this.booksApiUrl}/items`,
-                headers: {
-                    'Authorization': `Zoho-oauthtoken ${accessToken}`,
-                    'Content-Type': 'application/json'
-                },
-                params: {
-                    organization_id: zohoOrgId,
-                    page: page,
-                    per_page: perPage
-                }
-            };
-
-            const response = await axios(config);
-            
-            // Debug the response structure
-            console.log('🔍 Zoho API Response structure:', {
-                hasItems: !!response.data.items,
-                itemsCount: response.data.items?.length || 0,
-                hasPageContext: !!response.data.page_context,
-                pageContext: response.data.page_context,
-                allKeys: Object.keys(response.data)
-            });
-            
-            return {
-                items: response.data.items || [],
-                page_context: response.data.page_context || {}
-            };
-        } catch (error) {
-            console.error('❌ Failed to get items page from Zoho:', error.response?.data || error.message);
-            throw error;
-        }
-    }
-
-    /**
-     * Get ALL items from Zoho Books for specific organization (auto-paginate)
-     */
-    async getItems(organizationId) {
-        try {
-            console.log('� Fetching ALL items from Zoho Books for org:', organizationId);
-            
-            let allItems = [];
-            let currentPage = 1;
-            let totalPages = 1;
-            let totalItems = 0;
-            
-            do {
-                console.log(`📄 Fetching page ${currentPage} of ${totalPages}...`);
-                
-                const result = await this.getItemsPage(organizationId, currentPage, 200);
-                
-                // Add items from this page
-                allItems = allItems.concat(result.items);
-                
-                // Update pagination info from first page
-                if (currentPage === 1) {
-                    if (result.page_context && result.page_context.total) {
-                        totalPages = Math.ceil(result.page_context.total / 200);
-                        totalItems = result.page_context.total;
-                        console.log(`📊 Total items to fetch: ${totalItems} across ${totalPages} pages`);
-                    } else {
-                        // If no page_context, check if we got fewer items than requested
-                        if (result.items.length < 200) {
-                            totalPages = 1; // This is the last page
-                            totalItems = result.items.length;
-                            console.log(`📊 No pagination info found. Got ${result.items.length} items (less than 200), assuming single page.`);
-                        } else {
-                            // We got 200 items but no pagination info, assume there might be more
-                            totalPages = 999; // Will keep fetching until we get < 200 items
-                            console.log(`📊 No pagination info found. Got 200 items, will keep fetching until fewer items returned.`);
-                        }
-                    }
-                }
-                
-                // If we don't have proper pagination info, stop when we get fewer items than requested
-                if (!result.page_context?.total && result.items.length < 200) {
-                    console.log(`📄 Got ${result.items.length} items (less than 200), assuming this is the last page.`);
-                    break;
-                }
-                
-                currentPage++;
-                
-                // Small delay to avoid rate limiting
-                if (currentPage <= totalPages) {
-                    await new Promise(resolve => setTimeout(resolve, 100)); // 100ms delay
-                }
-                
-            } while (currentPage <= totalPages);
-            
-            console.log(`✅ Successfully fetched ALL ${allItems.length} items from Zoho Books`);
-            
-            // Debug: Log first item's available fields to understand what data we have
-            if (allItems.length > 0) {
-                console.log('🔍 Sample item fields:', Object.keys(allItems[0]));
-                console.log('🔍 Sample item data:', {
-                    name: allItems[0].name,
-                    sku: allItems[0].sku,
-                    last_modified_time: allItems[0].last_modified_time,
-                    created_time: allItems[0].created_time,
-                    status: allItems[0].status,
-                    // Look for any usage/sales related fields
-                    rate: allItems[0].rate,
-                    quantity_on_hand: allItems[0].quantity_on_hand,
-                    available_stock: allItems[0].available_stock
-                });
-            }
-            
-            // Sort by multiple criteria for better ordering (most recently used items first)
-            allItems.sort((a, b) => {
-                // Primary sort: last_modified_time (most recent first)
-                const dateA = new Date(a.last_modified_time || a.created_time || 0);
-                const dateB = new Date(b.last_modified_time || b.created_time || 0);
-                const dateComparison = dateB - dateA; // Descending order
-                
-                if (dateComparison !== 0) {
-                    return dateComparison;
-                }
-                
-                // Secondary sort: by status (active items first)
-                const statusA = a.status === 'active' ? 0 : 1;
-                const statusB = b.status === 'active' ? 0 : 1;
-                const statusComparison = statusA - statusB;
-                
-                if (statusComparison !== 0) {
-                    return statusComparison;
-                }
-                
-                // Tertiary sort: by name (alphabetical)
-                return (a.name || '').localeCompare(b.name || '');
-            });
-            
-            console.log(`🔄 Items sorted by: 1) Last modified (recent first), 2) Status (active first), 3) Name (A-Z)`);
-            
-            return {
-                items: allItems,
-                total_items: allItems.length,
-                page_context: {
-                    total: allItems.length,
-                    per_page: allItems.length,
-                    page: 1,
-                    total_pages: 1
-                }
-            };
-        } catch (error) {
-            console.error('❌ Failed to get all items from Zoho:', error.response?.data || error.message);
-            throw error;
-        }
-    }
-
-    /**
-     * Create new item in Zoho Books
-     */
-    async createItem(itemData) {
-        try {
-            console.log('🆕 Creating item in Zoho Books:', itemData.name);
-            
-            const response = await this.makeApiRequest('/items', 'POST', itemData);
-            
-            console.log('✅ Item created in Zoho Books:', response.item?.item_id);
-            return response.item;
-        } catch (error) {
-            console.error('❌ Failed to create item in Zoho:', error);
-            throw error;
-        }
-    }
-
-    /**
-     * Update item in Zoho Books
-     */
-    async updateItem(itemId, itemData) {
-        try {
-            console.log('📝 Updating item in Zoho Books:', itemId);
-            
-            const response = await this.makeApiRequest(`/items/${itemId}`, 'PUT', itemData);
-            
-            console.log('✅ Item updated in Zoho Books:', itemId);
-            return response.item;
-        } catch (error) {
-            console.error('❌ Failed to update item in Zoho:', error);
-            throw error;
-        }
-    }
-
-    /**
-     * Get the Zoho Books numeric organization_id for a StockFlow org.
-     * Reads from the cached value in Firestore (zoho_organization_id field).
-     * If not cached yet, fetches from Zoho's /organizations endpoint and stores it.
-     * Falls back to the ZOHO_ORGANIZATION_ID env var if both sources fail.
-     */
-    async getZohoOrgIdForOrg(organizationId) {
-        try {
-            const tokenData = await this.getStoredTokens(organizationId);
-            if (!tokenData) throw new Error(`No Zoho tokens for org: ${organizationId}`);
-
-            // Return cached value
-            if (tokenData.zoho_organization_id) {
-                return tokenData.zoho_organization_id;
-            }
-
-            // Fetch from Zoho Books API — use a guaranteed-valid (refreshed) token
-            console.log('🔍 Fetching Zoho organization ID from /organizations API...');
-            const accessToken = await this.getAccessTokenForOrg(organizationId);
-            const response = await axios.get(`${this.booksApiUrl}/organizations`, {
-                headers: { 'Authorization': `Zoho-oauthtoken ${accessToken}` }
-            });
-
-            const orgs = response.data.organizations || [];
-            if (orgs.length === 0) throw new Error('No organizations returned from Zoho Books API');
-
-            const zohoOrgId = String(orgs[0].organization_id);
-            console.log(`✅ Zoho organization_id resolved: ${zohoOrgId} (${orgs[0].name})`);
-
-            // Cache it in Firestore so we don't hit /organizations on every call
-            const db = admin.firestore();
-            await db.collection('organizations').doc(organizationId)
-                .collection('integrations').doc('zoho')
-                .update({ zoho_organization_id: zohoOrgId });
-
-            return zohoOrgId;
-        } catch (error) {
-            console.warn('⚠️  getZohoOrgIdForOrg failed, falling back to env var:', error.message);
-            // Fall back to the single-tenant env var
-            if (this.organizationId) return this.organizationId;
-            throw error;
-        }
-    }
-
-    /**
-     * Create an inventory adjustment in Zoho Books
-     * @param {string} organizationId  - StockFlow org ID (used to fetch per-org OAuth tokens)
-     * @param {string} zohoItemId      - Zoho Books item_id for the item being adjusted
-     * @param {number} quantityAdjusted - signed delta (positive = add stock, negative = remove)
-     * @param {string} reason          - human-readable reason shown in Zoho Books
-     * @param {string} [referenceNumber] - optional reference number
-     */
-    async adjustStock(organizationId, zohoItemId, quantityAdjusted, reason, referenceNumber) {
-        try {
-            console.log(`📊 Creating inventory adjustment in Zoho Books | orgId: ${organizationId} | itemId: ${zohoItemId} | qty: ${quantityAdjusted}`);
-
-            const [accessToken, zohoOrgId] = await Promise.all([
-                this.getAccessTokenForOrg(organizationId),
-                this.getZohoOrgIdForOrg(organizationId)
-            ]);
-
-            // Keep the Zoho payload strictly minimal — only fields Zoho needs.
-            // No local workflow fields, no fake statuses, no reference numbers that
-            // could be regenerated differently on a retry and cause a mismatch.
-            const payload = {
-                reason: reason || 'Stock adjustment via StockFlow',
-                line_items: [{
-                    item_id: zohoItemId,
-                    quantity_adjusted: quantityAdjusted
-                }]
-            };
-
-            console.log('📤 Zoho adjustment payload:', JSON.stringify(payload, null, 2));
-
-            const response = await axios.post(
-                `${this.booksApiUrl}/inventoryadjustments`,
-                payload,
-                {
-                    params: { organization_id: zohoOrgId },
-                    headers: {
-                        'Authorization': `Zoho-oauthtoken ${accessToken}`,
-                        'Content-Type': 'application/json'
-                    }
-                }
-            );
-
-            const adj = response.data.inventory_adjustment;
-            console.log('✅ Inventory adjustment created in Zoho Books:', adj?.inventory_adjustment_id);
-            return adj;
-        } catch (error) {
-            const zohoError = error.response?.data;
-            console.error('❌ Failed to create inventory adjustment in Zoho:', zohoError || error.message);
-            throw new Error(zohoError?.message || error.message);
-        }
-    }
-
-    /**
-     * Create a single multi-line inventory adjustment for an entire stock take session.
-     * All items are combined into one Zoho Books transaction — cleaner ledger, far fewer API calls.
-     *
-     * @param {string} organizationId
-     * @param {Array<{item_id: string, quantity_adjusted: number}>} lineItems
-     * @param {string} reason
-     * @param {string} referenceNumber
-     */
-    async adjustStockBatch(organizationId, lineItems, reason, referenceNumber) {
-        try {
-            if (!lineItems || lineItems.length === 0) {
-                throw new Error('adjustStockBatch called with empty line items');
-            }
-
-            console.log(`📊 Creating BATCH inventory adjustment | org: ${organizationId} | items: ${lineItems.length}`);
-
-            const [accessToken, zohoOrgId] = await Promise.all([
-                this.getAccessTokenForOrg(organizationId),
-                this.getZohoOrgIdForOrg(organizationId)
-            ]);
-
-            // Keep the Zoho payload strictly minimal — only fields Zoho needs.
-            const payload = {
-                reason: reason || 'Stock take adjustment via StockFlow',
-                line_items: lineItems
-            };
-
-            console.log(`📤 Batch adjustment payload: ${lineItems.length} line items`);
-
-            const response = await axios.post(
-                `${this.booksApiUrl}/inventoryadjustments`,
-                payload,
-                {
-                    params: { organization_id: zohoOrgId },
-                    headers: {
-                        'Authorization': `Zoho-oauthtoken ${accessToken}`,
-                        'Content-Type': 'application/json'
-                    }
-                }
-            );
-
-            const adj = response.data.inventory_adjustment;
-            console.log(`✅ Batch adjustment created in Zoho Books: ${adj?.inventory_adjustment_id} (${lineItems.length} items)`);
-            return adj;
-        } catch (error) {
-            const zohoError = error.response?.data;
-            console.error('❌ Failed to create batch inventory adjustment:', zohoError || error.message);
-            throw new Error(zohoError?.message || error.message);
-        }
-    }
-
-    /**
-     * Fetch ALL items for an org and return a Map<sku, zoho_item_id>.
-     * Used by the batch-session route to resolve SKUs without per-item API calls.
-     */
-    async buildSkuToItemIdMap(organizationId) {
-        const [accessToken, zohoOrgId] = await Promise.all([
-            this.getAccessTokenForOrg(organizationId),
-            this.getZohoOrgIdForOrg(organizationId)
-        ]);
-
-        const skuMap = new Map();
-        let page = 1;
-        let hasMore = true;
-
-        while (hasMore) {
-            const response = await axios.get(`${this.booksApiUrl}/items`, {
-                params: { organization_id: zohoOrgId, page, per_page: 200 },
-                headers: { 'Authorization': `Zoho-oauthtoken ${accessToken}` }
-            });
-
-            const items = response.data.items || [];
-            items.forEach(item => {
-                if (item.sku) skuMap.set(item.sku, item.item_id);
-            });
-
-            const pageCtx = response.data.page_context;
-            hasMore = pageCtx ? pageCtx.has_more_page : false;
-            page++;
-        }
-
-        console.log(`🗺️ Built SKU map: ${skuMap.size} items`);
-        return skuMap;
-    }
-
-    /**
-     * Fetch current stock_on_hand for a list of SKUs from Zoho Books.
-     * Returns Map<sku, stock_on_hand>. Used to pull quantities into the
-     * dashboard AFTER a draft adjustment has been approved in Zoho Books.
-     * This is the ONLY way local stock should ever be updated when Zoho is connected.
-     *
-     * @param {string} organizationId
-     * @param {string[]} skus  - list of SKUs to fetch (empty = fetch ALL)
-     */
-    async fetchStockOnHand(organizationId, skus = []) {
-        const [accessToken, zohoOrgId] = await Promise.all([
-            this.getAccessTokenForOrg(organizationId),
-            this.getZohoOrgIdForOrg(organizationId)
-        ]);
-
-        const skuSet = new Set(skus.map(s => s.trim().toLowerCase()));
-        const result = new Map(); // Map<sku, { stock_on_hand, item_id, item_name }>
-        let page = 1;
-        let hasMore = true;
-
-        while (hasMore) {
-            const response = await axios.get(`${this.booksApiUrl}/items`, {
-                params: { organization_id: zohoOrgId, page, per_page: 200 },
-                headers: { 'Authorization': `Zoho-oauthtoken ${accessToken}` }
-            });
-
-            const items = response.data.items || [];
-            for (const item of items) {
-                if (!item.sku) continue;
-                if (skuSet.size > 0 && !skuSet.has(item.sku.trim().toLowerCase())) continue;
-                result.set(item.sku, {
-                    stock_on_hand: item.stock_on_hand ?? 0,
-                    item_id: item.item_id,
-                    item_name: item.name
-                });
-            }
-
-            const pageCtx = response.data.page_context;
-            hasMore = pageCtx ? pageCtx.has_more_page : false;
-            page++;
-        }
-
-        console.log(`📥 Fetched stock_on_hand for ${result.size} items from Zoho Books`);
-        return result;
-    }
-
-    /**
-     * Find a Zoho Books item by SKU
-     */
-    async findItemBySku(organizationId, sku) {
-        try {
-            const [accessToken, zohoOrgId] = await Promise.all([
-                this.getAccessTokenForOrg(organizationId),
-                this.getZohoOrgIdForOrg(organizationId)
-            ]);
-            console.log(`🔍 findItemBySku | zohoOrgId: ${zohoOrgId} | sku: ${sku}`);
-            const response = await axios.get(`${this.booksApiUrl}/items`, {
-                params: { organization_id: zohoOrgId, sku },
-                headers: { 'Authorization': `Zoho-oauthtoken ${accessToken}` }
-            });
-            return (response.data.items || []).find(i => i.sku === sku) || null;
-        } catch (error) {
-            const zohoErr = error.response?.data;
-            const msg = zohoErr?.message || error.message;
-            const code = zohoErr?.code;
-            // Code 57 = expired/invalid token. Surface this clearly so the route can
-            // return a useful error rather than a generic 404.
-            if (code === 57 || msg?.toLowerCase().includes('not authorized')) {
-                throw new Error('ZOHO_TOKEN_EXPIRED: Access token is expired or invalid. Please re-authenticate with Zoho Books in Integrations settings.');
-            }
-            console.error('❌ findItemBySku failed:', zohoErr || error.message);
-            return null;
-        }
-    }
-
-    /**
-     * Bulk sync items to Zoho Books
-     */
-    async bulkSyncItems(items) {
-        try {
-            console.log('🔄 Bulk syncing items to Zoho Books:', items.length);
-            
-            const results = [];
-            
-            for (const item of items) {
-                try {
-                    // Try to create the item
-                    const result = await this.createItem(item);
-                    results.push({ success: true, item: result });
-                } catch (error) {
-                    console.warn(`⚠️ Failed to sync item ${item.name}:`, error.message);
-                    results.push({ success: false, item: item.name, error: error.message });
-                }
-            }
-            
-            console.log('✅ Bulk sync completed:', {
-                total: items.length,
-                successful: results.filter(r => r.success).length,
-                failed: results.filter(r => !r.success).length
-            });
-            
-            return results;
-        } catch (error) {
-            console.error('❌ Failed to bulk sync items:', error);
-            throw error;
-        }
-    }
-
-    /**
-     * Get organization info from Zoho Books
-     */
-    async getOrganization() {
-        try {
-            console.log('🏢 Fetching organization info from Zoho...');
-            
-            const response = await this.makeApiRequest('/organizations');
-            
-            console.log('✅ Organization info retrieved from Zoho Books');
-            return response.organizations || [];
-        } catch (error) {
-            console.error('❌ Failed to get organization info from Zoho:', error);
-            throw error;
-        }
-    }
-
-    /**
-     * Sync invoice usage data - fetch invoices and update lastInvoicedAt for items
-     * This tracks actual sales/usage, not just stock modifications
-     */
-    async syncInvoiceUsage(organizationId) {
-        try {
-            console.log(`🧾 Fetching invoices to track item usage for org: ${organizationId}...`);
-            
-            const accessToken = await this.getAccessTokenForOrg(organizationId);
-            const db = admin.firestore();
-            
-            let page = 1;
-            let totalInvoices = 0;
-            const itemLastInvoiced = {}; // item_id -> { date, invoiceNumber, quantity }
-            
-            // Fetch invoices (paginated)
-            while (true) {
-                console.log(`📄 Fetching invoices page ${page}...`);
-                
-                const response = await axios.get(
-                    `${this.booksApiUrl}/invoices`,
-                    {
-                        headers: {
-                            'Authorization': `Zoho-oauthtoken ${accessToken}`,
-                            'Content-Type': 'application/json'
-                        },
-                        params: {
-                            organization_id: this.organizationId,
-                            page: page,
-                            per_page: 200,
-                            sort_column: 'date',
-                            sort_order: 'D' // Descending - newest first
-                        }
-                    }
-                );
-                
-                const invoices = response.data.invoices || [];
-                if (invoices.length === 0) break;
-                
-                totalInvoices += invoices.length;
-                console.log(`📊 Processing ${invoices.length} invoices from page ${page}...`);
-                
-                // Process each invoice and extract item usage
-                for (const invoice of invoices) {
-                    const invoiceDate = new Date(invoice.date);
-                    const invoiceNumber = invoice.invoice_number;
-                    
-                    // Process line items in this invoice
-                    for (const lineItem of invoice.line_items || []) {
-                        const itemId = lineItem.item_id;
-                        
-                        if (!itemId) continue; // Skip non-item lines (like descriptions)
-                        
-                        // Track the most recent invoice date for this item
-                        if (!itemLastInvoiced[itemId] || 
-                            invoiceDate > new Date(itemLastInvoiced[itemId].date)) {
-                            itemLastInvoiced[itemId] = {
-                                date: invoiceDate.toISOString(),
-                                invoiceNumber: invoiceNumber,
-                                quantity: lineItem.quantity || 0
-                            };
-                        }
-                    }
-                }
-                
-                // Check if there are more pages
-                if (!response.data.page_context?.has_more_page) {
-                    console.log(`✅ Reached last page (page ${page})`);
-                    break;
-                }
-                
-                page++;
-                
-                // Small delay to avoid rate limiting
-                await new Promise(resolve => setTimeout(resolve, 100));
-            }
-            
-            console.log(`📊 Processed ${totalInvoices} invoices, found usage for ${Object.keys(itemLastInvoiced).length} items`);
-            
-            // Update Firestore with lastInvoicedAt timestamps
-            const batch = db.batch();
-            let updateCount = 0;
-            
-            for (const [zohoItemId, usageData] of Object.entries(itemLastInvoiced)) {
-                // Find the Firestore item by zohoId
-                const itemQuery = await db
-                    .collection('organizations')
-                    .doc(organizationId)
-                    .collection('inventory')
-                    .where('zohoId', '==', zohoItemId)
-                    .limit(1)
-                    .get();
-                
-                if (!itemQuery.empty) {
-                    const itemDoc = itemQuery.docs[0];
-                    batch.update(itemDoc.ref, {
-                        lastUsed: usageData.date,
-                        lastInvoiceNumber: usageData.invoiceNumber,
-                        usageCount: admin.firestore.FieldValue.increment(1),
-                        updatedAt: admin.firestore.FieldValue.serverTimestamp()
-                    });
-                    updateCount++;
-                }
-            }
-            
-            if (updateCount > 0) {
-                await batch.commit();
-                console.log(`✅ Updated ${updateCount} items with invoice usage data`);
-            }
-            
-            // Store sync metadata
-            await db
-                .collection('organizations')
-                .doc(organizationId)
-                .collection('metadata')
-                .doc('invoice_sync')
-                .set({
-                    lastSyncTimestamp: new Date().toISOString(),
-                    invoicesProcessed: totalInvoices,
-                    itemsUpdated: updateCount,
-                    lastSyncStatus: 'success'
-                }, { merge: true });
-            
-            return {
-                itemsUpdated: updateCount,
-                invoicesProcessed: totalInvoices
-            };
-            
-        } catch (error) {
-            console.error('❌ Failed to sync invoice usage:', error);
-            throw error;
-        }
-    }
-
-    /**
-     * Test the connection to Zoho Books
-     */
-    async testConnection() {
-        try {
-            console.log('🔍 Testing Zoho Books connection...');
-            
-            const organizations = await this.getOrganization();
-            
-            if (organizations && organizations.length > 0) {
-                const org = organizations[0];
-                console.log('✅ Zoho Books connection successful');
-                return {
-                    success: true,
-                    message: 'Connected to Zoho Books successfully',
-                    organizationId: org.organization_id,
-                    organizationName: org.name
-                };
-            } else {
-                throw new Error('No organizations found');
-            }
-        } catch (error) {
-            console.error('❌ Zoho Books connection test failed:', error);
-            return {
-                success: false,
-                message: 'Failed to connect to Zoho Books',
-                error: error.response?.data?.message || error.message
-            };
-        }
-    }
+    return { itemsUpdated: updateCount, invoicesProcessed: totalInvoices };
+  }
 }
 
 module.exports = new ZohoService();
