@@ -99,6 +99,12 @@ router.get('/config', verifyFirebaseToken, async (req, res) => {
       return res.json({ success: true, configured: false });
     }
 
+    // Always return the env-var redirect URI as the authoritative value —
+    // this is what the backend will actually send to Zoho, and what the user
+    // must register in the Zoho API Console.  The DB value is only a fallback.
+    const canonicalRedirectUri =
+      (process.env.ZOHO_REDIRECT_URI || cfg.redirectUri || '').trim();
+
     res.json({
       success: true,
       configured: true,
@@ -106,7 +112,7 @@ router.get('/config', verifyFirebaseToken, async (req, res) => {
         clientId:    cfg.clientId,
         zohoOrgId:   cfg.zohoOrgId,
         region:      cfg.region,
-        redirectUri: cfg.redirectUri || '',
+        redirectUri: canonicalRedirectUri,
         // clientSecret intentionally omitted
       },
     });
@@ -149,8 +155,8 @@ router.get('/auth/url', verifyFirebaseToken, async (req, res) => {
 
     // ZOHO_REDIRECT_URI env var is the single source of truth — it must match
     // exactly what is registered in the Zoho API Console.
-    // We no longer use cfg.redirectUri (which could be stale from an old setup).
-    const redirectUri = process.env.ZOHO_REDIRECT_URI || cfg.redirectUri;
+    // Trim to remove any accidental whitespace/newline from the Railway variable.
+    const redirectUri = (process.env.ZOHO_REDIRECT_URI || cfg.redirectUri || '').trim();
 
     if (!redirectUri) {
       return res.status(400).json({
