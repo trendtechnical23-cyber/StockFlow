@@ -48,9 +48,10 @@ function getUserClient(accessToken) {
     );
   }
 
+  const ws = require('ws');
   return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
     auth:     { autoRefreshToken: false, persistSession: false },
-    realtime: { enabled: false },
+    realtime: { transport: ws },
     global:   { headers: { Authorization: `Bearer ${accessToken}` } },
   });
 }

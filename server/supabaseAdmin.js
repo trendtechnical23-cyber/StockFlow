@@ -14,15 +14,14 @@
  *   SUPABASE_SERVICE_ROLE_KEY = eyJ...  (secret — never expose to frontend)
  */
 const { createClient } = require('@supabase/supabase-js');
+const ws = require('ws');
 
-// Backend clients NEVER need realtime subscriptions — the frontend handles
-// all WebSocket/realtime. Disabling it entirely prevents the Supabase SDK
-// from attempting to initialise a WebSocket transport on Node 20, which has
-// no native WebSocket global and would throw:
-//   "Node.js 20 detected without native WebSocket support"
+// Node 20 has no native WebSocket global — the Supabase SDK constructs a
+// RealtimeClient unconditionally, so we must pass the ws package as its
+// transport even though the backend never actually subscribes to channels.
 const BACKEND_OPTIONS = {
   auth:     { autoRefreshToken: false, persistSession: false },
-  realtime: { enabled: false },
+  realtime: { transport: ws },
   global:   { headers: { 'X-Client-Info': 'stockflow-backend' } },
 };
 
