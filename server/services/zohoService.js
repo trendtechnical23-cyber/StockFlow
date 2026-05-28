@@ -118,7 +118,9 @@ class ZohoService {
       }
 
       const { clientId, clientSecret, region } = orgConfig;
-      const redirectUri = orgConfig.redirectUri || this.redirectUri;
+      // Always use ZOHO_REDIRECT_URI env var — must exactly match what is
+      // registered in Zoho API Console and what was sent in the auth URL.
+      const redirectUri = process.env.ZOHO_REDIRECT_URI || orgConfig.redirectUri || this.redirectUri;
       const accountsUrl = this._accountsUrlForRegion(region);
 
       console.log('🔑 Token exchange params:', {

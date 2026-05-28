@@ -146,11 +146,21 @@ router.get('/auth/url', verifyFirebaseToken, async (req, res) => {
     }
 
     const accountsDomain = REGION_ACCOUNTS_DOMAIN[cfg.region] || 'accounts.zoho.com';
-    const redirectUri    = cfg.redirectUri || process.env.ZOHO_REDIRECT_URI;
+
+    // ZOHO_REDIRECT_URI env var is the single source of truth — it must match
+    // exactly what is registered in the Zoho API Console.
+    // We no longer use cfg.redirectUri (which could be stale from an old setup).
+    const redirectUri = process.env.ZOHO_REDIRECT_URI || cfg.redirectUri;
 
     if (!redirectUri) {
-      return res.status(400).json({ success: false, message: 'Redirect URI not configured. Please set it in Zoho integration settings.' });
+      return res.status(400).json({
+        success: false,
+        message: 'ZOHO_REDIRECT_URI env var not set on Railway. ' +
+                 'Add it in Railway → Variables: ZOHO_REDIRECT_URI=https://stockflow-production-9f3f.up.railway.app/callback/zoho',
+      });
     }
+
+    console.log('🔗 Using redirect URI:', redirectUri);
 
     const state = Buffer.from(JSON.stringify({ organizationId, userId, timestamp: Date.now() })).toString('base64');
 
