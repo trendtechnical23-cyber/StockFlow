@@ -166,8 +166,8 @@ router.get('/auth/url', verifyFirebaseToken, async (req, res) => {
       });
     }
 
-    console.log('🔗 Zoho auth URL — redirect URI:', redirectUri);
-    console.log('🔗 Zoho auth URL — client ID   :', cfg.clientId?.substring(0, 12) + '...');
+    console.log('🔗 Zoho auth URL — redirect URI:', redirectUri, `(len=${redirectUri.length})`);
+    console.log('🔗 Zoho auth URL — client ID   :', cfg.clientId);
     console.log('🔗 Zoho auth URL — region      :', cfg.region, '→', accountsDomain);
 
     const state = Buffer.from(JSON.stringify({ organizationId, userId, timestamp: Date.now() })).toString('base64');
@@ -181,6 +181,7 @@ router.get('/auth/url', verifyFirebaseToken, async (req, res) => {
       `access_type=offline&` +
       `prompt=consent`;
 
+    console.log('🔗 FULL auth URL:', authUrl);
     console.log('🔗 Generated Zoho auth URL for org:', organizationId);
     res.json({ success: true, authUrl, redirectUri });
   } catch (err) {
