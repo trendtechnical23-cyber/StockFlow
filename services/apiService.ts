@@ -189,15 +189,18 @@ export const getUserData = async (uid: string): Promise<{
               .eq('org_id', userData.org_id)
               .eq('is_active', true),
             supabase.from('organization_settings')
-              .select('notification_preferences')
+              .select('notification_preferences, zoho_config')
               .eq('org_id', userData.org_id)
               .maybeSingle(),
           ]);
 
           const orgData = orgResult.data;
           const invCount = invResult.count ?? 0;
+          const settings = settingsResult.data;
           const onboardingCompleted =
-            settingsResult.data?.notification_preferences?.onboarding_completed === true;
+            settings?.notification_preferences?.onboarding_completed === true;
+          const zohoConfig = settings?.zoho_config || {};
+          const zohoStatus = (zohoConfig.status as any) || 'disconnected';
 
           return {
             user: {
@@ -211,7 +214,12 @@ export const getUserData = async (uid: string): Promise<{
               id: orgData?.id ?? userData.org_id,
               name: orgData?.name ?? '',
               categories: [],
-              integrations: { zoho: { status: 'disconnected' as const } },
+              integrations: {
+                zoho: {
+                  status: zohoStatus,
+                  ...(zohoConfig.connectedAt ? { connectedAt: zohoConfig.connectedAt } : {}),
+                },
+              },
               subscription: { plan: (orgData?.plan === 'pro' ? 'Pro' : 'Free') as any, status: 'active' as const }
             } as Organization,
             inventoryCount: invCount,
@@ -868,18 +876,35 @@ export const updateOrganizationSettings = async (organizationId: string, setting
  */
 export const updateOrganizationIntegrations = async (organizationId: string, integrations: any): Promise<void> => {
   console.log('🔗 Updating organization integrations:', organizationId);
-  
-  if (!firestore) {
-    throw new Error('Firestore not initialized');
-  }
 
   try {
-    const orgRef = orgDataService.getOrgDoc(organizationId);
-    await updateDoc(orgRef, {
-      integrations: integrations,
-      updatedAt: serverTimestamp()
-    });
-    
+    const updates: Record<string, any> = {};
+
+    if (integrations.zoho !== undefined) {
+      // Fetch existing zoho_config so we don't clobber stored tokens
+      const { data: existing } = await supabase
+        .from('organization_settings')
+        .select('zoho_config')
+        .eq('org_id', organizationId)
+        .maybeSingle();
+
+      const existingZohoConfig: Record<string, any> = existing?.zoho_config || {};
+      updates.zoho_config = {
+        ...existingZohoConfig,
+        status: integrations.zoho.status,
+        ...(integrations.zoho.connectedAt ? { connectedAt: integrations.zoho.connectedAt } : {}),
+      };
+    }
+
+    const { error } = await supabase
+      .from('organization_settings')
+      .upsert(
+        { org_id: organizationId, ...updates },
+        { onConflict: 'org_id' }
+      );
+
+    if (error) throw error;
+
     console.log('✅ Organization integrations updated');
   } catch (error) {
     console.error('❌ Error updating organization integrations:', error);

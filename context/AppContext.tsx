@@ -1141,6 +1141,7 @@ export const AppProvider: React.FC<{ children: ReactNode, user: User, organizati
                 }
             }
         } catch (error) {
+            console.error('❌ handleUpdateIntegration failed:', error);
             addToast({ message: 'Failed to update integration.', type: 'error' });
         }
     }, [state.currentOrganization.id, addToast]);
