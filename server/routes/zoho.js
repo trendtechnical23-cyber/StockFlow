@@ -160,7 +160,9 @@ router.get('/auth/url', verifyFirebaseToken, async (req, res) => {
       });
     }
 
-    console.log('🔗 Using redirect URI:', redirectUri);
+    console.log('🔗 Zoho auth URL — redirect URI:', redirectUri);
+    console.log('🔗 Zoho auth URL — client ID   :', cfg.clientId?.substring(0, 12) + '...');
+    console.log('🔗 Zoho auth URL — region      :', cfg.region, '→', accountsDomain);
 
     const state = Buffer.from(JSON.stringify({ organizationId, userId, timestamp: Date.now() })).toString('base64');
 

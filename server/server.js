@@ -9,6 +9,13 @@ process.on('unhandledRejection', (reason) => {
 
 require('dotenv').config();
 
+// ── Startup env diagnostic ─────────────────────────────────────────────────────
+// Logged once at boot — visible in Railway Logs → helps confirm env vars are set.
+console.log('[ENV] ZOHO_REDIRECT_URI =', process.env.ZOHO_REDIRECT_URI || '⚠️  NOT SET');
+console.log('[ENV] CLIENT_URL        =', process.env.CLIENT_URL        || '⚠️  NOT SET');
+console.log('[ENV] SUPABASE_URL      =', process.env.SUPABASE_URL      ? '✅ set' : '⚠️  NOT SET');
+console.log('[ENV] SUPABASE_SERVICE_ROLE_KEY =', process.env.SUPABASE_SERVICE_ROLE_KEY ? '✅ set' : '⚠️  NOT SET');
+
 const express    = require('express');
 const helmet     = require('helmet');
 const cors       = require('cors');
