@@ -802,8 +802,11 @@ export const addLogAPI = async (logEntry: Omit<ActivityLogEntry, 'id' | 'timesta
  * Update activity logs with archive status (bulk update)
  */
 export const updateActivityLogsAPI = async (organizationId: string, updates: { id: string; archived?: boolean; archivedAt?: string }[]): Promise<void> => {
+  // Activity log archiving is a background UI feature — silently skip if
+  // the Supabase activity_logs table doesn't have an archived column yet.
+  if (!updates.length) return;
   if (!firestore) {
-    console.warn('Firestore not initialized, skipping activity log updates');
+    // no-op: archived column not in Supabase schema yet
     return;
   }
 

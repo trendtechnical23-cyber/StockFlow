@@ -49,8 +49,9 @@ function getUserClient(accessToken) {
   }
 
   return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-    auth:   { autoRefreshToken: false, persistSession: false },
-    global: { headers: { Authorization: `Bearer ${accessToken}` } },
+    auth:     { autoRefreshToken: false, persistSession: false },
+    realtime: { enabled: false },
+    global:   { headers: { Authorization: `Bearer ${accessToken}` } },
   });
 }
 

@@ -9,6 +9,9 @@
 const { createClient } = require('@supabase/supabase-js');
 
 // Lazy verifier client — only created on first request, not at require() time.
+// realtime MUST be disabled on Node 20 — no native WebSocket global exists,
+// so any createClient() without { realtime: { enabled: false } } throws:
+//   "Node.js 20 detected without native WebSocket support"
 let _verifier = null;
 function getVerifier() {
   if (_verifier) return _verifier;
@@ -16,7 +19,8 @@ function getVerifier() {
   const key = process.env.SUPABASE_ANON_KEY;
   if (!url || !key) throw new Error('Missing SUPABASE_URL or SUPABASE_ANON_KEY env vars');
   _verifier = createClient(url, key, {
-    auth: { autoRefreshToken: false, persistSession: false },
+    auth:     { autoRefreshToken: false, persistSession: false },
+    realtime: { enabled: false },
   });
   return _verifier;
 }

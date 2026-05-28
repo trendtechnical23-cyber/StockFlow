@@ -15,9 +15,17 @@
  */
 const { createClient } = require('@supabase/supabase-js');
 
-// ws is installed as a dependency and used by @supabase/supabase-js internally
-// for WebSocket support on Node.js < 22. We don't need to pass it manually —
-// the Supabase client detects and uses the native WebSocket in Node 20+.
+// Backend clients NEVER need realtime subscriptions — the frontend handles
+// all WebSocket/realtime. Disabling it entirely prevents the Supabase SDK
+// from attempting to initialise a WebSocket transport on Node 20, which has
+// no native WebSocket global and would throw:
+//   "Node.js 20 detected without native WebSocket support"
+const BACKEND_OPTIONS = {
+  auth:     { autoRefreshToken: false, persistSession: false },
+  realtime: { enabled: false },
+  global:   { headers: { 'X-Client-Info': 'stockflow-backend' } },
+};
+
 let _client = null;
 
 function getClient() {
@@ -34,9 +42,7 @@ function getClient() {
     );
   }
 
-  _client = createClient(url, key, {
-    auth: { autoRefreshToken: false, persistSession: false },
-  });
+  _client = createClient(url, key, BACKEND_OPTIONS);
 
   console.log('[SUPABASE ADMIN] Client initialized ✅');
   return _client;
