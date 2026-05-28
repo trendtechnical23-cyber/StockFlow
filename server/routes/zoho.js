@@ -82,6 +82,7 @@ router.post('/config', verifyFirebaseToken, async (req, res) => {
  * Check if per-org Zoho config exists (returns safe, non-secret fields only)
  */
 router.get('/config', verifyFirebaseToken, async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store'); // prevent 304 stale cache
   try {
     const { orgId } = req.query;
     if (!orgId) return res.status(400).json({ success: false, message: 'Missing orgId' });

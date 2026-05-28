@@ -17,9 +17,13 @@ interface ZohoSetupModalProps {
   onConfigSaved: () => void;
 }
 
-// The redirect URL Zoho sends users back to after auth.
-// Derived from API_BASE_URL so it stays in sync across environments.
-const DEFAULT_REDIRECT_URL = `${API_BASE_URL.replace(/\/$/, '')}/callback/zoho`;
+// Zoho redirects straight to the Vercel frontend after auth.
+// The frontend picks up the code + state from the URL and POSTs to the backend.
+// This avoids the Railway → Vercel relay hop that was causing "Invalid Redirect URI".
+const FRONTEND_URL =
+  import.meta.env.VITE_FRONTEND_URL ||
+  (typeof window !== 'undefined' ? `${window.location.protocol}//${window.location.host}` : '');
+const DEFAULT_REDIRECT_URL = `${FRONTEND_URL.replace(/\/$/, '')}/callback/zoho`;
 
 const REGION_OPTIONS = [
   { value: 'us', label: 'United States (zoho.com)', consoleUrl: 'https://api-console.zoho.com' },
