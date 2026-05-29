@@ -12,36 +12,38 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 CREATE EXTENSION IF NOT EXISTS "pg_trgm";     -- fast SKU/name search
 
 -- ================================================================
--- TEARDOWN — drop everything in reverse-dependency order
--- CASCADE handles any missed FK chains
+-- TEARDOWN — drop everything safely regardless of current state
+-- Triggers are dropped implicitly by DROP TABLE ... CASCADE.
+-- We use a DO block for functions/types so missing objects don't
+-- abort the entire script (handles partial-delete scenarios).
 -- ================================================================
 
-DROP TRIGGER IF EXISTS trg_movements_update_balance  ON stock_movements;
-DROP TRIGGER IF EXISTS trg_movements_immutable        ON stock_movements;
-DROP TRIGGER IF EXISTS trg_balance_low_stock          ON inventory_balances;
-DROP TRIGGER IF EXISTS trg_orgs_updated_at            ON organizations;
-DROP TRIGGER IF EXISTS trg_users_updated_at           ON users;
-DROP TRIGGER IF EXISTS trg_items_updated_at           ON inventory_items;
-DROP TRIGGER IF EXISTS on_auth_user_created           ON auth.users;
+-- Drop the auth trigger first (references a function we'll drop)
+DO $$ BEGIN
+  DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+EXCEPTION WHEN OTHERS THEN NULL; END $$;
 
-DROP FUNCTION IF EXISTS fn_update_inventory_balance() CASCADE;
-DROP FUNCTION IF EXISTS fn_movements_immutable()      CASCADE;
-DROP FUNCTION IF EXISTS fn_check_low_stock()          CASCADE;
-DROP FUNCTION IF EXISTS fn_set_updated_at()           CASCADE;
-DROP FUNCTION IF EXISTS handle_new_auth_user()        CASCADE;
-DROP FUNCTION IF EXISTS get_my_org_id()               CASCADE;
-DROP FUNCTION IF EXISTS is_manager_or_owner()         CASCADE;
+-- Drop all functions (CASCADE removes any dependent triggers/policies)
+DROP FUNCTION IF EXISTS fn_update_inventory_balance()                              CASCADE;
+DROP FUNCTION IF EXISTS fn_movements_immutable()                                   CASCADE;
+DROP FUNCTION IF EXISTS fn_check_low_stock()                                       CASCADE;
+DROP FUNCTION IF EXISTS fn_set_updated_at()                                        CASCADE;
+DROP FUNCTION IF EXISTS handle_new_auth_user()                                     CASCADE;
+DROP FUNCTION IF EXISTS get_my_org_id()                                            CASCADE;
+DROP FUNCTION IF EXISTS is_manager_or_owner()                                      CASCADE;
 DROP FUNCTION IF EXISTS create_organization_with_owner(UUID,TEXT,TEXT,UUID,TEXT,TEXT) CASCADE;
-DROP FUNCTION IF EXISTS rpc_record_movement(UUID,UUID,UUID,movement_type,NUMERIC,NUMERIC,TEXT,UUID,TEXT,UUID) CASCADE;
-DROP FUNCTION IF EXISTS rpc_approve_stock_take(UUID,UUID)     CASCADE;
-DROP FUNCTION IF EXISTS rpc_process_approval(UUID,UUID,TEXT,TEXT) CASCADE;
-DROP FUNCTION IF EXISTS rpc_get_item_stock(UUID,UUID)         CASCADE;
-DROP FUNCTION IF EXISTS rpc_get_org_stock_summary(UUID)       CASCADE;
+DROP FUNCTION IF EXISTS rpc_create_org_with_owner(UUID,TEXT,TEXT,UUID,TEXT,TEXT)   CASCADE;
+DROP FUNCTION IF EXISTS rpc_approve_stock_take(UUID,UUID)                          CASCADE;
+DROP FUNCTION IF EXISTS rpc_process_approval(UUID,UUID,TEXT,TEXT)                  CASCADE;
+DROP FUNCTION IF EXISTS rpc_get_item_stock(UUID,UUID)                              CASCADE;
+DROP FUNCTION IF EXISTS rpc_get_org_stock_summary(UUID)                            CASCADE;
 
-DROP TYPE IF EXISTS movement_type   CASCADE;
-DROP TYPE IF EXISTS approval_status CASCADE;
-DROP TYPE IF EXISTS approval_type   CASCADE;
+-- Drop the RPC that depends on the movement_type enum last
+DO $$ BEGIN
+  DROP FUNCTION IF EXISTS rpc_record_movement(UUID,UUID,UUID,movement_type,NUMERIC,NUMERIC,TEXT,UUID,TEXT,UUID) CASCADE;
+EXCEPTION WHEN OTHERS THEN NULL; END $$;
 
+-- Drop tables in reverse-dependency order (CASCADE handles FK chains)
 DROP TABLE IF EXISTS fcm_tokens             CASCADE;
 DROP TABLE IF EXISTS notifications          CASCADE;
 DROP TABLE IF EXISTS activity_logs          CASCADE;
@@ -58,6 +60,13 @@ DROP TABLE IF EXISTS role_permissions       CASCADE;
 DROP TABLE IF EXISTS permissions            CASCADE;
 DROP TABLE IF EXISTS roles                  CASCADE;
 DROP TABLE IF EXISTS users                  CASCADE;
+DROP TABLE IF EXISTS organization_settings  CASCADE;
+DROP TABLE IF EXISTS organizations          CASCADE;
+
+-- Drop enum types after tables (tables held references)
+DROP TYPE IF EXISTS movement_type   CASCADE;
+DROP TYPE IF EXISTS approval_status CASCADE;
+DROP TYPE IF EXISTS approval_type   CASCADE;
 DROP TABLE IF EXISTS organization_settings  CASCADE;
 DROP TABLE IF EXISTS organizations          CASCADE;
 
