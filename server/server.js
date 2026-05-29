@@ -193,6 +193,7 @@ function mountRoutes() {
     }
   };
 
+  safeMount('/api/approvals',  './routes/approvals');  // enterprise approval workflow
   safeMount('/api/devices',    './routes/devices');
   safeMount('/api/stock',      './routes/stock');
   safeMount('/api',            './routes/read');

@@ -284,3 +284,183 @@ export interface PriorityItem {
     note?: string;
     addedAt?: string;
 }
+
+// ============================================================
+// ENTERPRISE v2 TYPES  (schema 002_enterprise_schema.sql)
+// These replace the legacy interfaces above over time.
+// New code should import from here or from stockMovementService.ts
+// ============================================================
+
+/** Matches the movement_type Postgres ENUM */
+export type MovementType =
+  | 'OPENING_BALANCE'
+  | 'RECEIVE'
+  | 'SALE'
+  | 'TRANSFER_IN'
+  | 'TRANSFER_OUT'
+  | 'ADJUSTMENT_IN'
+  | 'ADJUSTMENT_OUT'
+  | 'DAMAGE'
+  | 'RETURN_IN'
+  | 'RETURN_OUT'
+  | 'STOCKTAKE_GAIN'
+  | 'STOCKTAKE_LOSS';
+
+export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'cancelled';
+export type ApprovalType   = 'stock_adjustment' | 'stock_take_session' | 'item_creation' | 'item_deletion' | 'item_update';
+
+/**
+ * Immutable ledger entry — the source of truth for all stock.
+ * positive quantity = stock in, negative = stock out.
+ */
+export interface StockMovementV2 {
+  id:            string;
+  orgId:         string;
+  itemId:        string;
+  locationId:    string | null;
+  movementType:  MovementType;
+  quantity:      number;
+  unitCost:      number | null;
+  referenceType: string | null;
+  referenceId:   string | null;
+  notes:         string | null;
+  performedBy:   string;
+  balanceAfter:  number | null;
+  createdAt:     string;
+  // Joined relations (when selected)
+  performer?: { id: string; fullName: string | null; email: string | null };
+  item?:      { id: string; sku: string; name: string };
+}
+
+/** Materialized stock balance cache — derived from stock_movements. */
+export interface InventoryBalance {
+  id:         string;
+  orgId:      string;
+  itemId:     string;
+  locationId: string | null;
+  quantity:   number;
+  updatedAt:  string;
+}
+
+/**
+ * Product master data — no quantity/stock fields.
+ * Current stock is always from InventoryBalance or rpc_get_org_stock_summary.
+ */
+export interface InventoryItemV2 {
+  id:            string;
+  orgId:         string;
+  categoryId:    string | null;
+  unitId:        string | null;
+  sku:           string;
+  barcode:       string | null;
+  name:          string;
+  description:   string | null;
+  unitCost:      number | null;
+  unitPrice:     number | null;
+  minimumStock:  number;
+  reorderPoint:  number | null;
+  maximumStock:  number | null;
+  isActive:      boolean;
+  isPriority:    boolean;
+  imageUrl:      string | null;
+  metadata:      Record<string, any>;
+  createdBy:     string | null;
+  createdAt:     string;
+  updatedAt:     string;
+  // Joined from inventory_balances / rpc_get_org_stock_summary
+  currentStock?: number;
+  isLowStock?:   boolean;
+  isOutOfStock?: boolean;
+}
+
+/** Enterprise approval request — includes both requester and reviewer. */
+export interface ApprovalRequestV2 {
+  id:              string;
+  type:            ApprovalType;
+  status:          ApprovalStatus;
+  delta:           number | null;
+  reason:          string | null;
+  reviewNotes:     string | null;
+  createdAt:       string;
+  reviewedAt:      string | null;
+  itemId:          string | null;
+  itemName:        string | null;
+  itemSKU:         string | null;
+  requestedBy:     string;
+  requestedByName: string | null;
+  reviewedBy:      string | null;
+  reviewedByName:  string | null;
+  metadata:        Record<string, any>;
+}
+
+/** Stock take session with status lifecycle. */
+export interface StockTakeSessionV2 {
+  id:          string;
+  orgId:       string;
+  name:        string;
+  locationId:  string | null;
+  status:      'open' | 'counting' | 'closed' | 'approved' | 'rejected';
+  startedBy:   string;
+  closedBy:    string | null;
+  approvedBy:  string | null;
+  startedAt:   string;
+  closedAt:    string | null;
+  approvedAt:  string | null;
+  notes:       string | null;
+}
+
+/** Stock take entry — variance is computed (counted - expected). */
+export interface StockTakeEntryV2 {
+  id:          string;
+  sessionId:   string;
+  orgId:       string;
+  itemId:      string;
+  locationId:  string | null;
+  expectedQty: number;
+  countedQty:  number;
+  variance:    number;   // GENERATED ALWAYS AS (counted_qty - expected_qty)
+  countedBy:   string;
+  movementId:  string | null;  // populated after approval
+  countedAt:   string;
+  notes:       string | null;
+}
+
+/** Organization FCM token for a specific device. */
+export interface FcmToken {
+  id:           string;
+  orgId:        string;
+  userId:       string;
+  deviceId:     string;
+  platform:     'android' | 'ios' | 'web';
+  token:        string;
+  lastActiveAt: string;
+  createdAt:    string;
+}
+
+/** Location in the warehouse hierarchy (warehouse → shelf → bin). */
+export interface InventoryLocation {
+  id:          string;
+  orgId:       string;
+  name:        string;
+  type:        'warehouse' | 'store' | 'shelf' | 'bin' | 'van' | 'virtual';
+  parentId:    string | null;
+  description: string | null;
+  isActive:    boolean;
+  createdAt:   string;
+}
+
+/** Enterprise org-stock summary row (from rpc_get_org_stock_summary). */
+export interface OrgStockSummaryRow {
+  itemId:       string;
+  sku:          string;
+  name:         string;
+  categoryId:   string | null;
+  unitCost:     number | null;
+  unitPrice:    number | null;
+  currentStock: number;
+  minimumStock: number;
+  reorderPoint: number | null;
+  isLowStock:   boolean;
+  isOutOfStock: boolean;
+  isPriority:   boolean;
+}

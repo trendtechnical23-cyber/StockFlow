@@ -65,7 +65,7 @@ const verifyFirebaseToken = async (req, res, next) => {
     // single() throws PGRST116 on 0 rows, which silently nulls orgId — fixed here.
     const { data: publicUser, error: userError } = await supabaseAdmin
       .from('users')
-      .select('org_id, role, full_name')
+      .select('org_id, legacy_role, full_name')
       .eq('id', user.id)
       .maybeSingle();
 
@@ -80,19 +80,20 @@ const verifyFirebaseToken = async (req, res, next) => {
     const { data: emailUser } = !publicUser
       ? await supabaseAdmin
           .from('users')
-          .select('org_id, role, full_name')
+          .select('org_id, legacy_role, full_name')
           .eq('email', user.email)
           .maybeSingle()
       : { data: null };
 
     const resolvedUser = publicUser || emailUser;
 
+    const resolvedRole = resolvedUser?.legacy_role ?? user.user_metadata?.role ?? 'staff';
     req.user = {
       uid:   user.id,
       email: user.email,
       orgId: resolvedUser?.org_id ?? user.user_metadata?.org_id ?? null,
-      role:  resolvedUser?.role   ?? user.user_metadata?.role   ?? 'staff',
-      roles: resolvedUser?.role ? [resolvedUser.role] : [],
+      role:  resolvedRole,
+      roles: [resolvedRole],
     };
 
     // Expose the raw token so downstream middleware (attachUserClient) and
@@ -140,4 +141,20 @@ const requireOrg = (orgIdParamName = 'orgId') => (req, res, next) => {
   next();
 };
 
-module.exports = { verifyFirebaseToken, requireOrg };
+/**
+ * Require the authenticated user to be an owner or manager.
+ * Must be used AFTER verifyFirebaseToken.
+ */
+const requireManagerRole = (req, res, next) => {
+  if (!req.user) {
+    return res.status(401).json({ error: { message: 'Authentication required', status: 401 } });
+  }
+  if (!['owner', 'manager'].includes(req.user.role)) {
+    return res.status(403).json({
+      error: { message: 'Manager or owner role required for this action', status: 403 }
+    });
+  }
+  next();
+};
+
+module.exports = { verifyFirebaseToken, requireOrg, requireManagerRole };
