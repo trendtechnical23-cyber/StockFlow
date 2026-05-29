@@ -930,156 +930,47 @@ export const getLogs = async (): Promise<ActivityLogEntry[]> => {
 };
 
 // Keep existing Zoho integration functions (they work within organization context)
-export const importFromZoho = async (itemsToImport: any[], organizationId: string): Promise<InventoryItem[]> => {
-  console.log('📥 Importing items from Zoho Books:', itemsToImport.length);
+/**
+ * Import all items from Zoho Books into Supabase.
+ * Delegates entirely to the backend (POST /api/zoho/import) which:
+ *   1. Fetches all items from Zoho using the stored (auto-refreshed) token
+ *   2. Transforms them to inventory_items shape
+ *   3. Upserts into Supabase by org_id + sku
+ *
+ * The itemsToImport param is ignored — the backend fetches fresh from Zoho.
+ */
+export const importFromZoho = async (_itemsToImport: any[], organizationId: string): Promise<InventoryItem[]> => {
+  console.log('📥 Delegating Zoho import to backend for org:', organizationId);
 
-  if (!firestore) {
-    throw new Error('Firestore not initialized');
+  const token = await getAccessToken();
+  if (!token) throw new Error('Not authenticated');
+
+  const response = await fetch(API_ENDPOINTS.zohoImport(organizationId), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  const data = await response.json();
+
+  if (response.status === 401) {
+    throw new Error(data.message || 'Zoho access token expired. Please reconnect Zoho Books in Integrations.');
+  }
+  if (!response.ok || !data.success) {
+    throw new Error(data.message || `Zoho import failed: HTTP ${response.status}`);
   }
 
-  try {
-    // Validate Zoho integration and env before writing anything
-    const orgRef = orgDataService.getOrgDoc(organizationId);
-    const orgSnap = await getDoc(orgRef);
-    if (!orgSnap.exists()) {
-      throw new Error('Organization not found');
-    }
-    const integrations = (orgSnap.data() as any).integrations || { zoho: { status: 'disconnected' } };
-    const zohoStatus = integrations.zoho?.status || 'disconnected';
-    if (zohoStatus !== 'connected') {
-      console.warn('⛔ Zoho import blocked: integration not connected for org', organizationId);
-      throw new Error('Zoho is not connected. Please connect your Zoho account first in Integrations.');
-    }
-    if (!ZohoService.isConfigured()) {
-      console.warn('⛔ Zoho import blocked: credentials not configured in environment');
-      throw new Error('Zoho credentials are not configured. Please set VITE_ZOHO_* env vars and reconnect.');
-    }
+  console.log(`✅ Zoho backend import complete: ${data.data.upserted} items upserted`);
 
-    // Transform Zoho items to standard format
-    const items: Omit<InventoryItem, 'id'>[] = itemsToImport.map((zohoItem) => {
-      const lastModifiedTime = zohoItem.last_modified_time || new Date().toISOString();
-      
-      // Debug: Log first item to see what Zoho sends
-      if (itemsToImport.indexOf(zohoItem) === 0) {
-        console.log('🔍 Sample Zoho item data:', {
-          name: zohoItem.name,
-          last_modified_time: zohoItem.last_modified_time,
-          purchase_rate: zohoItem.purchase_rate,
-          rate: zohoItem.rate,
-          stock_on_hand: zohoItem.stock_on_hand
-        });
-      }
-      
-      return {
-        name: zohoItem.name || 'Unknown Item',
-        sku: zohoItem.sku || zohoItem.item_id || '',
-        category: zohoItem.category_name || '', // Leave blank if no category from Zoho
-        stock: parseInt(zohoItem.stock_on_hand) || 0,
-        threshold: 10,
-        description: zohoItem.description || '',
-        unit: zohoItem.unit || 'pcs',
-        cost: parseFloat(zohoItem.purchase_rate) || 0, // Cost = what you PAY (purchase_rate)
-        price: parseFloat(zohoItem.rate) || 0, // Selling price = what customer PAYS (rate)
-        supplier: zohoItem.vendor_name || 'Unknown',
-        organizationId: organizationId,
-        source: 'zoho' as const,
-        lastModified: lastModifiedTime,
-        lastUsed: lastModifiedTime, // Use Zoho's last modified as usage indicator
-        usageCount: 0,
-        // Required properties from firebase.ts
-        isActive: true,
-        priority: false,
-        lastUsedAt: new Date(lastModifiedTime),
-        lastModifiedAt: new Date(lastModifiedTime),
-        metadata: {
-          description: zohoItem.description || ''
-        }
-      };
-    });
-
-    // Check for duplicates by SKU and handle them
-    const inventoryRef = orgDataService.getOrgCollection(organizationId, 'inventory');
-    const existingSnapshot = await getDocs(inventoryRef);
-    const existingItems = new Map<string, { id: string; data: any }>();
-    
-    existingSnapshot.docs.forEach(doc => {
-      if (doc.id !== '_init') {
-        const data = doc.data();
-        if (data.sku) {
-          existingItems.set(data.sku.toLowerCase(), { id: doc.id, data });
-        }
-      }
-    });
-    
-    // Separate new items from updates
-    const newItems: Omit<InventoryItem, 'id'>[] = [];
-    const updateItems: { id: string; data: Omit<InventoryItem, 'id'> }[] = [];
-    const duplicateWarnings: string[] = [];
-    
-    items.forEach((item) => {
-      const existingItem = existingItems.get(item.sku.toLowerCase());
-      if (existingItem) {
-        // Preserve locally-tracked stock and threshold — never let a Zoho fetch overwrite them.
-        // Only sync metadata (name, price, cost, category, barcode) from Zoho.
-        const preservedItem = {
-          ...item,
-          stock: existingItem.data.stock ?? item.stock,
-          threshold: existingItem.data.threshold ?? item.threshold,
-        };
-        updateItems.push({ id: existingItem.id, data: preservedItem });
-        duplicateWarnings.push(`SKU "${item.sku}" - ${item.name}`);
-      } else {
-        newItems.push(item);
-      }
-    });
-    
-    // Save items to Firestore in batches
-    const batch = writeBatch(firestore);
-    const importedItems: InventoryItem[] = [];
-    
-    // Add new items
-    newItems.forEach((item) => {
-      const docRef = doc(inventoryRef);
-      batch.set(docRef, {
-        ...item,
-        id: docRef.id,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp()
-      });
-
-      importedItems.push({ ...item, id: docRef.id });
-    });
-    
-    // Update existing items (overwrite duplicates)
-    updateItems.forEach(({ id, data }) => {
-      const docRef = doc(inventoryRef, id);
-      batch.update(docRef, {
-        ...data,
-        updatedAt: serverTimestamp()
-      });
-
-      importedItems.push({ ...data, id });
-    });
-    
-    await batch.commit();
-    
-    // Log duplicate handling
-    if (duplicateWarnings.length > 0) {
-      console.log(`⚠️ Overwritten ${duplicateWarnings.length} duplicate items from Zoho:`, duplicateWarnings.slice(0, 5));
-    }
-    
-    console.log(`✅ Zoho import completed: ${newItems.length} new, ${updateItems.length} updated`);
-    
-    // Return items with metadata about duplicates
-    const result = importedItems as any;
-    result._duplicatesOverwritten = duplicateWarnings.length;
-    result._duplicateItems = duplicateWarnings.slice(0, 10);
-    
-    return result;
-  } catch (error) {
-    console.error('❌ Error importing from Zoho:', error);
-    throw error;
-  }
+  // Return an empty array with metadata — the caller reloads inventory from Supabase
+  const result: any[] = [];
+  result._duplicatesOverwritten = 0;
+  result._duplicateItems = [];
+  result._importedCount = data.data.upserted;
+  result._totalZoho = data.data.total;
+  return result;
 };
 
 /**

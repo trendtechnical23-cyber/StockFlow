@@ -39,6 +39,8 @@ export const API_BASE_URL = getApiBaseUrl();
 export const API_ENDPOINTS = {
   createUser: `${API_BASE_URL}/api/admin/createUser`,
   zohoItems: (orgId: string) => `${API_BASE_URL}/api/zoho/items?orgId=${orgId}`,
+  zohoImport: (orgId: string) => `${API_BASE_URL}/api/zoho/import?orgId=${orgId}`,
+  zohoTokens: (orgId: string) => `${API_BASE_URL}/api/zoho/tokens?orgId=${orgId}`,
   zohoSyncInvoices: `${API_BASE_URL}/api/zoho/sync-invoice-usage`,
   zohoAuthUrl: (organizationId: string, userId: string) => 
     `${API_BASE_URL}/api/zoho/auth/url?organizationId=${organizationId}&userId=${userId}`,

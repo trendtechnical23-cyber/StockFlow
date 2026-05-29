@@ -179,8 +179,8 @@ const IntegrationsView: React.FC = () => {
         addToast({ message: 'Running debug import (first 5 items)...', type: 'info' });
         
         try {
-            const rawItems = await ZohoService.importItems(currentOrganization.id);
-            
+            const rawItems = await getZohoItems(currentOrganization.id);
+
             console.log('🔍 RAW ZOHO DATA (first 5 items):');
             rawItems.slice(0, 5).forEach((item: any, index: number) => {
                 console.log(`📦 Item ${index + 1}:`, {
@@ -191,7 +191,7 @@ const IntegrationsView: React.FC = () => {
                     full_raw_item: item
                 });
             });
-            
+
             addToast({ message: `Debug complete! Check console for details of ${rawItems.length} items.`, type: 'success' });
         } catch (error: any) {
             addToast({ message: `Debug import failed: ${error.message}`, type: 'error' });
@@ -207,29 +207,21 @@ const IntegrationsView: React.FC = () => {
         }
 
         setIsImporting(true);
-        addToast({ message: 'Fetching ALL items from Zoho Books...', type: 'info' });
+        addToast({ message: 'Fetching & importing all items from Zoho Books…', type: 'info' });
 
         try {
-            const zohoItems = await getZohoItems(currentOrganization.id);
-            addToast({ message: `Retrieved ${zohoItems.length} items. Now importing...`, type: 'info' });
-            
-            const importedItems = await importFromZoho(zohoItems, currentOrganization.id);
-            
-            // Check for duplicates and show appropriate message
-            const duplicatesOverwritten = (importedItems as any)._duplicatesOverwritten || 0;
-            const duplicateItems = (importedItems as any)._duplicateItems || [];
-            
-            if (duplicatesOverwritten > 0) {
-                const duplicateList = duplicateItems.slice(0, 3).join(', ');
-                const moreText = duplicatesOverwritten > 3 ? ` and ${duplicatesOverwritten - 3} more` : '';
-                addToast({ 
-                    message: `Imported ${importedItems.length} items. Overwrote ${duplicatesOverwritten} duplicate(s): ${duplicateList}${moreText}`, 
-                    type: 'warning' 
-                });
-            } else {
-                addToast({ message: `Successfully imported ${importedItems.length} new items.`, type: 'success' });
-            }
-            
+            // importFromZoho now delegates entirely to the backend in one call
+            // (fetch from Zoho + transform + upsert into Supabase)
+            const importedItems = await importFromZoho([], currentOrganization.id);
+
+            const importedCount = (importedItems as any)._importedCount ?? 0;
+            const totalZoho    = (importedItems as any)._totalZoho    ?? importedCount;
+
+            addToast({
+                message: `Successfully imported ${importedCount} items from Zoho Books (${totalZoho} total fetched).`,
+                type: 'success',
+            });
+
             setTimeout(() => window.location.reload(), 2000);
             
         } catch (error: any) {

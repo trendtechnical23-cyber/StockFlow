@@ -628,4 +628,145 @@ router.get('/organization', async (req, res) => {
   }
 });
 
+// ── Import all Zoho items into Supabase ────────────────────────────────────────
+
+/**
+ * POST /api/zoho/import?orgId=xxx
+ * Fetch every item from Zoho Books, transform it, and upsert into
+ * Supabase inventory_items (matched by org_id + sku).
+ * Token refresh is automatic — no manual reconnect needed unless the
+ * refresh_token itself has been revoked.
+ */
+router.post('/import', verifyFirebaseToken, async (req, res) => {
+  const orgId = req.query.orgId;
+  if (!orgId) return res.status(400).json({ success: false, message: 'Missing orgId' });
+
+  try {
+    // Fetch all pages from Zoho (backend handles token refresh automatically)
+    let result;
+    try {
+      result = await zohoService.getItems(orgId);
+    } catch (tokenErr) {
+      const msg = tokenErr.message || '';
+      if (
+        msg.startsWith('ZOHO_TOKEN_EXPIRED') ||
+        msg.startsWith('ZOHO_REAUTH_REQUIRED') ||
+        msg.includes('not authorized')
+      ) {
+        return res.status(401).json({
+          success: false,
+          message: 'Zoho access token expired. Please reconnect Zoho Books in Integrations.',
+          code: 'ZOHO_TOKEN_EXPIRED',
+        });
+      }
+      throw tokenErr;
+    }
+
+    const zohoItems = result.items || [];
+    console.log(`📦 Transforming ${zohoItems.length} Zoho items for Supabase upsert…`);
+
+    // Transform Zoho item shape → inventory_items columns
+    const transformed = zohoItems.map(item => {
+      // Smart quantity detection with multiple fallbacks
+      const qtyFields = [
+        'stock_on_hand', 'actual_available_stock', 'available_stock',
+        'available_for_sale_stock', 'quantity_on_hand', 'quantity', 'current_stock',
+      ];
+      let qty = 0;
+      for (const f of qtyFields) {
+        const v = Number(item[f]);
+        if (!isNaN(v)) { qty = Math.round(v); break; }
+      }
+      // Fall back to warehouse totals
+      if (qty === 0 && Array.isArray(item.warehouse_stocks) && item.warehouse_stocks.length) {
+        qty = Math.round(item.warehouse_stocks.reduce((s, w) =>
+          s + (Number(w.stock_on_hand || w.actual_available_stock || w.available_stock) || 0), 0));
+      }
+
+      const sku = (item.sku || '').trim() || `ZOHO-${item.item_id}`;
+      return {
+        org_id:       orgId,
+        sku,
+        name:         (item.name || 'Unknown Item').trim(),
+        category:     item.category_name || null,
+        quantity:     qty,
+        min_quantity: Math.max(1, Number(item.reorder_level || item.minimum_order_quantity || 10)),
+        unit_price:   Number(item.rate) > 0   ? Number(item.rate)          : null,
+        cost_price:   Number(item.purchase_rate) > 0 ? Number(item.purchase_rate) : null,
+        unit:         item.unit        || null,
+        description:  item.description || null,
+        source:       'zoho',
+        is_active:    item.status === 'active',
+        updated_at:   new Date().toISOString(),
+      };
+    }).filter(r => r.sku); // require a SKU
+
+    // Upsert in batches of 200 (Supabase row limit per request)
+    let upserted = 0, failed = 0;
+    const BATCH = 200;
+    for (let i = 0; i < transformed.length; i += BATCH) {
+      const batch = transformed.slice(i, i + BATCH);
+      const { error } = await supabase
+        .from('inventory_items')
+        .upsert(batch, { onConflict: 'org_id,sku' });
+      if (error) {
+        console.error(`❌ Batch upsert error (rows ${i}–${i + batch.length}):`, error.message);
+        failed += batch.length;
+      } else {
+        upserted += batch.length;
+      }
+    }
+
+    console.log(`✅ Zoho import complete — ${upserted} upserted, ${failed} failed`);
+    res.json({
+      success: true,
+      message: `Imported ${upserted} items from Zoho Books${failed ? ` (${failed} failed)` : ''}`,
+      data: { total: zohoItems.length, upserted, failed, timestamp: new Date().toISOString() },
+    });
+  } catch (err) {
+    console.error('❌ /api/zoho/import failed:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+/**
+ * DELETE /api/zoho/tokens?orgId=xxx
+ * Clear OAuth tokens (disconnect) while preserving clientId / clientSecret / region
+ * so the user doesn't have to re-enter credentials to reconnect later.
+ */
+router.delete('/tokens', verifyFirebaseToken, async (req, res) => {
+  const orgId = req.query.orgId;
+  if (!orgId) return res.status(400).json({ success: false, message: 'Missing orgId' });
+
+  try {
+    const { data: existing } = await supabase
+      .from('organization_settings')
+      .select('zoho_config')
+      .eq('org_id', orgId)
+      .maybeSingle();
+
+    const cfg = existing?.zoho_config || {};
+    // Keep only credential / config fields — strip all token fields
+    const {
+      access_token, refresh_token, expires_at, expires_in,
+      token_type, scope, userId, zoho_organization_id,
+      status, connectedAt,
+      ...credentialsOnly
+    } = cfg;
+
+    await supabase
+      .from('organization_settings')
+      .upsert(
+        { org_id: orgId, zoho_config: { ...credentialsOnly, status: 'disconnected' } },
+        { onConflict: 'org_id' }
+      );
+
+    console.log('✅ Zoho tokens cleared for org:', orgId);
+    res.json({ success: true, message: 'Zoho disconnected successfully' });
+  } catch (err) {
+    console.error('❌ Failed to clear Zoho tokens:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 module.exports = router;
