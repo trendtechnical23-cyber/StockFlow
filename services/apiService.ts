@@ -138,9 +138,9 @@ export const getUserByEmail = async (email: string): Promise<{
         uid: userData.id,
         name: userData.full_name ?? userData.email,
         email: userData.email,
-        role: userData.role as UserRole,
+        role: (userData.legacy_role ?? userData.role) as UserRole,
         organizationId: userData.org_id,
-        invited: !userData.is_active,
+        invited: userData.status === 'inactive',
       } as User,
       organization: {
         id: orgData?.id ?? userData.org_id,
@@ -189,7 +189,7 @@ export const getUserData = async (uid: string): Promise<{
               .eq('org_id', userData.org_id)
               .eq('is_active', true),
             supabase.from('organization_settings')
-              .select('notification_preferences, zoho_config')
+              .select('notification_preferences, zoho_config, onboarding_completed')
               .eq('org_id', userData.org_id)
               .maybeSingle(),
           ]);
@@ -197,7 +197,9 @@ export const getUserData = async (uid: string): Promise<{
           const orgData = orgResult.data;
           const invCount = invResult.count ?? 0;
           const settings = settingsResult.data;
+          // Check both the clean boolean column (v3) and legacy JSONB path (backward compat)
           const onboardingCompleted =
+            settings?.onboarding_completed === true ||
             settings?.notification_preferences?.onboarding_completed === true;
           const zohoConfig = settings?.zoho_config || {};
           const zohoStatus = (zohoConfig.status as any) || 'disconnected';
@@ -207,7 +209,7 @@ export const getUserData = async (uid: string): Promise<{
               uid: userData.id,
               name: userData.full_name ?? userData.email,
               email: userData.email,
-              role: userData.role as UserRole,
+              role: (userData.legacy_role ?? userData.role) as UserRole,
               organizationId: userData.org_id,
             } as User,
             organization: {
@@ -256,7 +258,11 @@ export const markOnboardingComplete = async (organizationId: string, uid: string
     await supabase
       .from('organization_settings')
       .upsert(
-        { org_id: organizationId, notification_preferences: { onboarding_completed: true } },
+        {
+          org_id:                organizationId,
+          onboarding_completed:  true,                              // v3 clean boolean
+          notification_preferences: { onboarding_completed: true }, // v1 compat
+        },
         { onConflict: 'org_id', ignoreDuplicates: false }
       );
     console.log('✅ Onboarding marked complete for', uid);
