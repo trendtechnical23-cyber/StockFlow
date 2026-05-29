@@ -469,11 +469,23 @@ export const AppProvider: React.FC<{ children: ReactNode, user: User, organizati
         // These catch any rows that changed between the initial loadData() call
         // and the moment the Realtime subscription became active.
         const backfillInventory = async () => {
-            const { data } = await supabase
-                .from('inventory_items').select('*')
-                .eq('org_id', orgId).eq('is_active', true)
-                .order('updated_at', { ascending: false });
-            if (data) dispatch({ type: 'SET_INVENTORY', payload: sortByUsage(data.map(mapInvRow)) });
+            // Paginate — PostgREST default cap is 1000 rows per request
+            const PAGE = 1000;
+            let all: any[] = [];
+            let from = 0;
+            while (true) {
+                const { data, error } = await supabase
+                    .from('inventory_items').select('*')
+                    .eq('org_id', orgId).eq('is_active', true)
+                    .order('updated_at', { ascending: false })
+                    .range(from, from + PAGE - 1);
+                if (error) { console.error('❌ backfillInventory error:', error.message); break; }
+                if (!data || data.length === 0) break;
+                all = all.concat(data);
+                if (data.length < PAGE) break;
+                from += PAGE;
+            }
+            dispatch({ type: 'SET_INVENTORY', payload: sortByUsage(all.map(mapInvRow)) });
         };
 
         const backfillLogs = async () => {

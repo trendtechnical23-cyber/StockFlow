@@ -262,12 +262,28 @@ export class OrganizationDataService {
 
   /** Bulk load of org data on startup */
   async getAllOrganizationData(organizationId: string) {
-    const [inventoryResult, usersResult, logsResult] = await Promise.all([
-      supabase
+    // Fetch ALL inventory pages — PostgREST caps at 1000 rows by default,
+    // so we paginate with range() until we get a partial page.
+    const PAGE = 1000;
+    let allInventory: any[] = [];
+    let from = 0;
+    while (true) {
+      const { data, error } = await supabase
         .from('inventory_items')
         .select('*')
+        .eq('org_id', organizationId)   // ← scope to this org only
         .eq('is_active', true)
-        .order('name'),
+        .order('name')
+        .range(from, from + PAGE - 1);
+
+      if (error) { console.error('❌ inventory_items page error:', error.message); break; }
+      if (!data || data.length === 0) break;
+      allInventory = allInventory.concat(data);
+      if (data.length < PAGE) break;   // last page
+      from += PAGE;
+    }
+
+    const [usersResult, logsResult] = await Promise.all([
       supabase
         .from('users')
         .select('*')
@@ -281,10 +297,12 @@ export class OrganizationDataService {
         .limit(100),
     ]);
 
+    console.log(`✅ Loaded ${allInventory.length} inventory items for org ${organizationId}`);
+
     return {
-      inventory:    inventoryResult.data  ?? [],
-      users:        usersResult.data      ?? [],
-      activityLogs: logsResult.data       ?? [],
+      inventory:    allInventory,
+      users:        usersResult.data  ?? [],
+      activityLogs: logsResult.data   ?? [],
     };
   }
 }

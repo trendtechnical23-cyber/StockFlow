@@ -1,41 +1,51 @@
 package com.trendstock.trendmobility.api
 
-import com.google.firebase.auth.FirebaseAuth
+import com.trendstock.trendmobility.BuildConfig
+import com.trendstock.trendmobility.auth.AuthManager
+import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
-import kotlinx.coroutines.tasks.await
 
+/**
+ * ApiClient — single Retrofit instance for ALL backend calls.
+ *
+ * Auth: Supabase JWT attached automatically via interceptor.
+ *       No Firebase Auth dependency.
+ */
 object ApiClient {
-    private const val BASE_URL = "https://stockflow-production-3876.up.railway.app/api/"
-    
+
     private val loggingInterceptor = HttpLoggingInterceptor().apply {
         level = HttpLoggingInterceptor.Level.BASIC
     }
-    
+
+    /** Attach the Supabase JWT to every request automatically. */
+    private val authInterceptor = Interceptor { chain ->
+        val token = AuthManager.getAccessTokenSync()
+        val req = chain.request().newBuilder().apply {
+            if (token != null) addHeader("Authorization", "Bearer $token")
+        }.build()
+        chain.proceed(req)
+    }
+
     private val okHttpClient = OkHttpClient.Builder()
+        .addInterceptor(authInterceptor)
         .addInterceptor(loggingInterceptor)
         .build()
-    
+
     private val retrofit = Retrofit.Builder()
-        .baseUrl(BASE_URL)
+        .baseUrl(BuildConfig.BACKEND_URL)
         .client(okHttpClient)
         .addConverterFactory(GsonConverterFactory.create())
         .build()
-    
-    val apiService: ApiService = retrofit.create(ApiService::class.java)
-    
-    suspend fun getAuthToken(): String? {
-        return try {
-            FirebaseAuth.getInstance().currentUser?.getIdToken(false)?.await()?.token
-        } catch (e: Exception) {
-            null
-        }
-    }
-    
-    suspend fun getAuthHeader(): String? {
-        val token = getAuthToken()
-        return if (token != null) "Bearer $token" else null
+
+    val apiService:    ApiService       = retrofit.create(ApiService::class.java)
+    val mobileService: MobileApiService = retrofit.create(MobileApiService::class.java)
+
+    /** Get auth header string (for callers that still pass it manually). */
+    fun getAuthHeader(): String? {
+        val token = AuthManager.getAccessTokenSync() ?: return null
+        return "Bearer $token"
     }
 }

@@ -9,17 +9,16 @@ import android.net.Uri
 import android.os.Build
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.database.FirebaseDatabase
-import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 import com.trendstock.trendmobility.MainActivity
 import com.trendstock.trendmobility.R
+import com.trendstock.trendmobility.api.ApiClient
+import com.trendstock.trendmobility.api.FcmRegistrationRequest
+import com.trendstock.trendmobility.auth.AuthManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.tasks.await
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -126,10 +125,6 @@ class StockFlowMessagingService : FirebaseMessagingService() {
         const val TYPE_APPROVED         = "approved"
         const val TYPE_REJECTED         = "rejected"
     }
-
-    private val firestore = FirebaseFirestore.getInstance()
-    private val database  = FirebaseDatabase.getInstance()
-    private val auth      = FirebaseAuth.getInstance()
 
     override fun onCreate() {
         super.onCreate()
@@ -386,60 +381,26 @@ class StockFlowMessagingService : FirebaseMessagingService() {
             .getString("activeStockTakeSessionId", null)
     }
 
-    // ── FCM token storage ─────────────────────────────────────────────────────
+    // ── FCM token storage via backend API ─────────────────────────────────────
 
     private fun storeTokenInFirestore(token: String) {
-        val user = auth.currentUser ?: return
+        // Renamed for API compatibility. Delegates to the backend (/api/devices/register).
         val orgId = getSharedPreferences("StockFlowPrefs", MODE_PRIVATE)
             .getString("organizationId", null) ?: return
 
         CoroutineScope(Dispatchers.IO).launch {
-            try {
-                database.getReference("deviceTokens").child(user.uid).setValue(token).await()
-
-                firestore.collection("organizations").document(orgId)
-                    .collection("users").document(user.uid)
-                    .update(mapOf(
-                        "fcmToken"        to token,
-                        "tokenUpdatedAt"  to com.google.firebase.firestore.FieldValue.serverTimestamp(),
-                        "deviceInfo"      to mapOf(
-                            "platform"       to "android",
-                            "appVersion"     to getAppVersion(),
-                            "deviceModel"    to Build.MODEL,
-                            "androidVersion" to Build.VERSION.RELEASE
-                        )
-                    )).await()
-
-                Log.d(TAG, "FCM token stored for ${Build.MODEL}")
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to store FCM token: ${e.message}")
-            }
+            runCatching {
+                val accessToken = AuthManager.getAccessToken() ?: return@runCatching
+                ApiClient.mobileService.registerFcmToken(
+                    auth = "Bearer $accessToken",
+                    body = FcmRegistrationRequest(token, "android", orgId),
+                )
+                Log.d(TAG, "FCM token stored via backend for ${Build.MODEL}")
+            }.onFailure { Log.w(TAG, "FCM token store (non-fatal): ${it.message}") }
         }
-    }
-
-    private fun getAppVersion(): String {
-        return try {
-            packageManager.getPackageInfo(packageName, 0).versionName ?: "1.0"
-        } catch (e: Exception) { "1.0" }
     }
 
     fun deleteTokenFromFirestore() {
-        val user  = auth.currentUser ?: return
-        val orgId = getSharedPreferences("StockFlowPrefs", MODE_PRIVATE)
-            .getString("organizationId", null) ?: return
-
-        CoroutineScope(Dispatchers.IO).launch {
-            try {
-                firestore.collection("organizations").document(orgId)
-                    .collection("users").document(user.uid)
-                    .update(mapOf(
-                        "fcmToken"       to com.google.firebase.firestore.FieldValue.delete(),
-                        "tokenDeletedAt" to com.google.firebase.firestore.FieldValue.serverTimestamp()
-                    )).await()
-                Log.d(TAG, "FCM token deleted")
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to delete FCM token: ${e.message}")
-            }
-        }
+        FCMTokenManager.getInstance(this).clearToken()
     }
 }

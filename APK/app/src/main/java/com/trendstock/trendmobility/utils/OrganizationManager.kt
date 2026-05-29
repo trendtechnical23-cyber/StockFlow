@@ -111,6 +111,9 @@ object OrganizationManager {
             Log.e(TAG, "❌ Failed to restart notification listeners", e)
         }
         
+        // Also update AuthManager so the org UUID is always in sync
+        com.trendstock.trendmobility.auth.AuthManager.saveOrgId(newOrgId)
+
         Log.d(TAG, "✅ Organization switch complete")
     }
     

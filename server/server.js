@@ -204,6 +204,7 @@ function mountRoutes() {
   safeMount('/api/zoho',       './routes/zoho');
   safeMount('/api/pos',        './routes/pos');
   safeMount('/api/priority',   './routes/priority');
+  safeMount('/api/mobile',     './routes/mobile');
 
   console.log('[ROUTES] All routes mounted — server fully ready');
 

@@ -2,9 +2,9 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
-    // Add the Google services Gradle plugin
+    // Google services plugin — kept for Firebase Cloud Messaging (FCM) ONLY.
+    // Firebase Auth / Firestore / Realtime Database have been removed.
     id("com.google.gms.google-services")
-    // Add Kotlin Symbol Processing (KSP) for Room
     id("com.google.devtools.ksp") version "2.0.20-1.0.25"
 }
 
@@ -16,10 +16,25 @@ android {
         applicationId = "com.trendstock.trendmobility"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.2.0"
+        versionCode = 3
+        versionName = "2.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // ── Supabase config ───────────────────────────────────────────────────
+        // Fill in your Supabase project URL and anon key.
+        // Find them at: Supabase Dashboard → Project Settings → API
+        // DO NOT use the service_role key here — anon key only.
+        buildConfigField("String", "SUPABASE_URL",      "\"https://your-project.supabase.co\"")
+        buildConfigField("String", "SUPABASE_ANON_KEY", "\"your-supabase-anon-key\"")
+
+        // ── Backend URL ───────────────────────────────────────────────────────
+        buildConfigField("String", "BACKEND_URL", "\"https://stockflow-production-3876.up.railway.app/api/\"")
+    }
+
+    buildFeatures {
+        compose     = true
+        buildConfig = true   // required for BuildConfig fields above
     }
 
     buildTypes {
@@ -38,42 +53,28 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
-    buildFeatures {
-        compose = true
-    }
 }
 
 dependencies {
 
-    // Import the Firebase BoM
+    // ── Firebase ──────────────────────────────────────────────────────────────
+    // KEPT: Firebase Cloud Messaging (FCM) — push notifications.
+    // REMOVED: firebase-auth, firebase-firestore, firebase-database.
     implementation(platform("com.google.firebase:firebase-bom:33.5.1"))
-    
-    // Firebase Auth
-    implementation("com.google.firebase:firebase-auth")
-    
-    // Firebase Firestore (Cloud Firestore)
-    implementation("com.google.firebase:firebase-firestore")
-    
-    // Firebase Cloud Messaging (FCM)
     implementation("com.google.firebase:firebase-messaging")
-    
-    // Firebase Realtime Database (kept for compatibility)
-    implementation("com.google.firebase:firebase-database")
-    
-    // Room Database
+
+    // ── Room (local inventory cache — unchanged) ───────────────────────────
     implementation("androidx.room:room-runtime:2.6.1")
     implementation("androidx.room:room-ktx:2.6.1")
     ksp("androidx.room:room-compiler:2.6.1")
-    
-    // HTTP client for API calls
+
+    // ── Retrofit + OkHttp (backend + Supabase auth REST) ──────────────────
     implementation("com.squareup.retrofit2:retrofit:2.11.0")
     implementation("com.squareup.retrofit2:converter-gson:2.11.0")
     implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
-    
-    // Navigation
+
+    // ── Jetpack ────────────────────────────────────────────────────────────
     implementation("androidx.navigation:navigation-compose:2.8.3")
-    
-    // LiveData Compose
     implementation("androidx.compose.runtime:runtime-livedata:1.7.4")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.6")
 
