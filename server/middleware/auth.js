@@ -87,10 +87,12 @@ const verifyFirebaseToken = async (req, res, next) => {
     next();
 
   } catch (err) {
-    console.error('❌ Auth middleware error:', err.message);
-    return res.status(500).json({
-      error: { message: 'Internal server error during authentication', status: 500 }
-    });
+    // Propagate to the global error handler — it will log + format the response.
+    // Using next(err) instead of res.json() keeps the error pipeline consistent
+    // and ensures the global handler's Postgres-code mapping runs if needed.
+    err.statusCode = err.statusCode || 500;
+    err.message    = err.message    || 'Internal server error during authentication';
+    next(err);
   }
 };
 

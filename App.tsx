@@ -25,17 +25,109 @@ interface AuthData {
   organization: Organization;
 }
 
-const Spinner: React.FC<{ message?: string }> = ({ message }) => (
-  <div className="flex flex-col items-center justify-center min-h-screen">
-    <div className="animate-spin rounded-full h-32 w-32 border-t-2 border-b-2 border-indigo-500 mb-4"></div>
-    {message && (
-      <div className="text-center">
-        <p className="text-lg font-medium text-gray-900 dark:text-gray-100">{message}</p>
-        <p className="text-sm text-gray-500 dark:text-gray-400 mt-2">This may take a moment...</p>
-      </div>
-    )}
-  </div>
-);
+// ── Contextual cycling tips shown beneath the spinner ────────────────────────
+const SPINNER_CONTEXTS: { match: RegExp; tips: string[] }[] = [
+  {
+    match: /import|zoho|catalog|product/i,
+    tips: [
+      'Connecting to Zoho Books…',
+      'Fetching your product catalog…',
+      'Transforming item data…',
+      'Matching SKUs and categories…',
+      'Writing to your inventory…',
+      'Finalising your import…',
+    ],
+  },
+  {
+    match: /sign|check|verif|session|token/i,
+    tips: [
+      'Verifying your session…',
+      'Checking your workspace…',
+      'Looking you up…',
+      'Almost signed in…',
+    ],
+  },
+  {
+    match: /profile|user|account/i,
+    tips: [
+      'Retrieving your profile…',
+      'Loading your organisation…',
+      'Checking your permissions…',
+      'Setting up your workspace…',
+    ],
+  },
+  {
+    match: /dashboard|inventory|setup/i,
+    tips: [
+      'Loading your inventory…',
+      'Fetching your team…',
+      'Syncing activity logs…',
+      'Preparing your dashboard…',
+    ],
+  },
+  {
+    match: /complet|onboard|creat/i,
+    tips: [
+      'Creating your workspace…',
+      'Setting up your organisation…',
+      'Configuring defaults…',
+      'Almost ready for you…',
+    ],
+  },
+];
+
+const DEFAULT_TIPS = [
+  'StockFlow is working in the background…',
+  'Good things take a moment.',
+  'Hang tight — almost there.',
+  'Processing your request…',
+  'Making sure everything is just right…',
+];
+
+function getTips(message: string | undefined): string[] {
+  if (!message) return DEFAULT_TIPS;
+  const ctx = SPINNER_CONTEXTS.find(c => c.match.test(message));
+  return ctx ? ctx.tips : DEFAULT_TIPS;
+}
+
+const Spinner: React.FC<{ message?: string }> = ({ message }) => {
+  const tips = getTips(message);
+  const [tipIndex, setTipIndex] = React.useState(0);
+
+  React.useEffect(() => {
+    setTipIndex(0); // reset when the primary message changes
+  }, [message]);
+
+  React.useEffect(() => {
+    if (tips.length <= 1) return;
+    const id = setInterval(() => {
+      setTipIndex(i => (i + 1) % tips.length);
+    }, 2800);
+    return () => clearInterval(id);
+  }, [tips]);
+
+  return (
+    <div className="flex flex-col items-center justify-center min-h-screen bg-white dark:bg-gray-950 px-6">
+      {/* Spinner ring */}
+      <div className="animate-spin rounded-full h-16 w-16 border-[3px] border-indigo-100 border-t-indigo-500 mb-8" />
+
+      {/* Primary message */}
+      {message && (
+        <p className="text-base font-semibold text-gray-800 dark:text-gray-100 text-center mb-3">
+          {message}
+        </p>
+      )}
+
+      {/* Cycling tip — key forces re-mount for fade effect via CSS transition */}
+      <p
+        key={tipIndex}
+        className="text-sm text-gray-400 dark:text-gray-500 text-center max-w-xs animate-pulse"
+      >
+        {tips[tipIndex]}
+      </p>
+    </div>
+  );
+};
 
 const AppContent: React.FC = () => {
   const [authData, setAuthData] = useState<AuthData | null>(null);
@@ -217,7 +309,7 @@ const AppContent: React.FC = () => {
       // Only show fullscreen spinner on first load — background refreshes are silent
       if (!authData) {
         setIsLoading(true);
-        setLoadingMessage('Checking user profile...');
+        setLoadingMessage('Signing you in…');
       }
 
       // Clear onboarding flags when a DIFFERENT user logs in
@@ -237,7 +329,7 @@ const AppContent: React.FC = () => {
 
         if (result) {
           console.log('✅ Profile loaded:', result.user.name, '/', result.organization.name);
-          setLoadingMessage('Setting up dashboard...');
+          setLoadingMessage('Preparing your dashboard…');
 
           // Supabase is the authoritative source — localStorage is a fast-path cache.
           // If Supabase says completed, sync it back to localStorage so future
@@ -271,7 +363,7 @@ const AppContent: React.FC = () => {
           const isNewSignup = !!signupTs && (Date.now() - parseInt(signupTs, 10)) < 60_000;
 
           if (isNewSignup) {
-            setLoadingMessage('Completing account setup...');
+            setLoadingMessage('Completing account setup…');
             let retryResult = null;
             for (let i = 1; i <= 5; i++) {
               await new Promise(r => setTimeout(r, i * 1000));
