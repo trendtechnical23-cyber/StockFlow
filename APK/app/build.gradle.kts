@@ -29,7 +29,7 @@ android {
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"sb_publishable_W8ASXvv6EhmSaOQ7hJmQwQ_OYn6f-vE\"")
 
         // ── Backend URL ───────────────────────────────────────────────────────
-        buildConfigField("String", "BACKEND_URL", "\"https://stockflow-production-3876.up.railway.app/api/\"")
+        buildConfigField("String", "BACKEND_URL", "\"https://stockflow-production-9f3f.up.railway.app/api/\"")
     }
 
     buildFeatures {
