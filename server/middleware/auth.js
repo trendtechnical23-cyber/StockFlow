@@ -99,7 +99,7 @@ const verifyFirebaseToken = async (req, res, next) => {
     // route handlers can create RLS-enforced user-scoped Supabase clients.
     req.supabaseToken = token;
 
-    console.log(`✅ Token verified for ${req.user.email} (org: ${req.user.orgId})`);
+    console.log(`✅ Token verified for ${req.user.email} | uid=${req.user.uid} | org=${req.user.orgId ?? 'NOT FOUND'} | role=${req.user.role}`);
     next();
 
   } catch (err) {

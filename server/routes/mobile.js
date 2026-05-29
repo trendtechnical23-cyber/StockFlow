@@ -31,14 +31,17 @@ router.get('/user-org', verifyFirebaseToken, async (req, res) => {
   // middleware never silently blocks a valid user.
   if (!orgId) {
     console.warn(`[user-org] orgId missing for ${email} — running direct lookup`);
-    const { data: row } = await supabase
-      .from('users')
-      .select('org_id, role')
-      .or(`id.eq.${uid},email.eq.${email}`)
-      .maybeSingle();
+    // Two separate queries are safer than .or() with mixed UUID/text types
+    const { data: byUid } = await supabase
+      .from('users').select('org_id, role').eq('id', uid).maybeSingle();
+    const { data: byEmail } = !byUid
+      ? await supabase.from('users').select('org_id, role').eq('email', email).maybeSingle()
+      : { data: null };
+    const row = byUid || byEmail;
 
     orgId = row?.org_id ?? null;
     role  = row?.role   ?? role;
+    console.warn(`[user-org] direct lookup result — byUid:${!!byUid} byEmail:${!!byEmail} orgId:${orgId}`);
 
     if (orgId) {
       console.log(`[user-org] ✅ Resolved org ${orgId} via direct lookup for ${email}`);
