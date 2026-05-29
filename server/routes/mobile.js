@@ -23,14 +23,36 @@ const { verifyFirebaseToken } = require('../middleware/auth');
  * Returns the org UUID for the authenticated user.
  * APK calls this once right after Supabase login to resolve the org.
  */
-router.get('/user-org', verifyFirebaseToken, (req, res) => {
-  const { orgId, uid, email, role } = req.user;
+router.get('/user-org', verifyFirebaseToken, async (req, res) => {
+  let { orgId, uid, email, role } = req.user;
+
+  // Auth middleware already tried UID + email fallback.
+  // If orgId is still null do one final direct lookup so a misconfigured
+  // middleware never silently blocks a valid user.
   if (!orgId) {
+    console.warn(`[user-org] orgId missing for ${email} — running direct lookup`);
+    const { data: row } = await supabase
+      .from('users')
+      .select('org_id, role')
+      .or(`id.eq.${uid},email.eq.${email}`)
+      .maybeSingle();
+
+    orgId = row?.org_id ?? null;
+    role  = row?.role   ?? role;
+
+    if (orgId) {
+      console.log(`[user-org] ✅ Resolved org ${orgId} via direct lookup for ${email}`);
+    }
+  }
+
+  if (!orgId) {
+    console.error(`[user-org] ❌ Could not resolve org for uid=${uid} email=${email}`);
     return res.status(404).json({
       success: false,
-      message: 'No organisation found for this account. Contact your administrator.',
+      message: 'No organisation linked to this account. Ask your administrator to check your user record in Supabase.',
     });
   }
+
   res.json({ success: true, data: { orgId, userId: uid, email, role } });
 });
 

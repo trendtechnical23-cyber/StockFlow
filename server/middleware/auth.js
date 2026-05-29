@@ -60,23 +60,39 @@ const verifyFirebaseToken = async (req, res, next) => {
       });
     }
 
-    // Fetch org_id from public.users (service role bypasses RLS)
+    // Fetch org_id from public.users (service role bypasses RLS).
+    // maybeSingle() returns null data (no error) when the row doesn't exist.
+    // single() throws PGRST116 on 0 rows, which silently nulls orgId — fixed here.
     const { data: publicUser, error: userError } = await supabaseAdmin
       .from('users')
-      .select('org_id, role')
+      .select('org_id, role, full_name')
       .eq('id', user.id)
-      .single();
+      .maybeSingle();
 
-    if (userError || !publicUser) {
-      console.warn(`⚠️ No public.users record for ${user.email} (${user.id})`);
+    if (userError) {
+      console.warn(`⚠️ public.users lookup error for ${user.email} (${user.id}): ${userError.message}`);
     }
+    if (!publicUser) {
+      // Try email fallback — handles cases where the UID was re-created
+      console.warn(`⚠️ No public.users row for uid=${user.id}, trying email lookup: ${user.email}`);
+    }
+
+    const { data: emailUser } = !publicUser
+      ? await supabaseAdmin
+          .from('users')
+          .select('org_id, role, full_name')
+          .eq('email', user.email)
+          .maybeSingle()
+      : { data: null };
+
+    const resolvedUser = publicUser || emailUser;
 
     req.user = {
       uid:   user.id,
       email: user.email,
-      orgId: publicUser?.org_id ?? user.user_metadata?.org_id ?? null,
-      role:  publicUser?.role   ?? user.user_metadata?.role   ?? 'staff',
-      roles: publicUser?.role ? [publicUser.role] : [],
+      orgId: resolvedUser?.org_id ?? user.user_metadata?.org_id ?? null,
+      role:  resolvedUser?.role   ?? user.user_metadata?.role   ?? 'staff',
+      roles: resolvedUser?.role ? [resolvedUser.role] : [],
     };
 
     // Expose the raw token so downstream middleware (attachUserClient) and

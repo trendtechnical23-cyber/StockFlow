@@ -151,11 +151,16 @@ fun LoginScreen(
                             ApiClient.mobileService.getUserOrg(authHeader)
                         }
 
-                        val orgId = orgResult.getOrNull()?.body()?.data?.orgId
+                        val orgResponse = orgResult.getOrNull()
+                        val orgId = orgResponse?.body()?.data?.orgId
                         if (orgId.isNullOrBlank()) {
+                            val serverMsg = orgResponse?.body()?.message
+                                ?: orgResult.exceptionOrNull()?.message
+                                ?: "No organisation found for this account."
+                            android.util.Log.e("LoginScreen", "user-org failed: HTTP ${orgResponse?.code()} — $serverMsg")
                             AuthManager.clearSession()
                             withContext(Dispatchers.Main) {
-                                errorMessage = "No organisation found for this account. Contact your administrator."
+                                errorMessage = serverMsg
                                 isLoading    = false
                             }
                             return@launch
