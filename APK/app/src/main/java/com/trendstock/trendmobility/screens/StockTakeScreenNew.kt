@@ -1145,8 +1145,7 @@ private suspend fun exportSessionToCSV(context: Context, session: OfflineStockTa
         val writer = FileWriter(csvFile)
         
         // Get current user info
-        val currentUser = FirebaseAuth.getInstance().currentUser
-        val userName = currentUser?.email?.substringBefore("@") ?: currentUser?.displayName ?: "Unknown User"
+        val userName = AuthManager.getEmail()?.substringBefore("@") ?: "Unknown User"
         
         // Simple CSV header - essential columns plus user
         writer.append("Stock Take ID,Session Date,Item Name,SKU,Category,Description,")
