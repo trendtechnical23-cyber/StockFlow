@@ -2,7 +2,6 @@ package com.trendstock.trendmobility.utils
 
 import android.content.Context
 import android.util.Log
-import com.google.firebase.auth.FirebaseAuth
 import com.trendstock.trendmobility.database.AppDatabase
 import com.trendstock.trendmobility.database.InventoryRepository
 import kotlinx.coroutines.Dispatchers

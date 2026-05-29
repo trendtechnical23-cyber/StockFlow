@@ -172,6 +172,31 @@ object AuthManager {
     }
 
     /**
+     * Send a password-reset email via Supabase.
+     * POST https://[SUPABASE_URL]/auth/v1/recover
+     */
+    suspend fun sendPasswordReset(email: String): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val body = JSONObject().apply { put("email", email) }.toString()
+            val request = Request.Builder()
+                .url("${BuildConfig.SUPABASE_URL}/auth/v1/recover")
+                .post(body.toRequestBody("application/json".toMediaType()))
+                .addHeader("apikey",       BuildConfig.SUPABASE_ANON_KEY)
+                .addHeader("Content-Type", "application/json")
+                .build()
+            val response = httpClient.newCall(request).execute()
+            if (response.isSuccessful) Result.success(Unit)
+            else {
+                val msg = runCatching { JSONObject(response.body?.string() ?: "").optString("msg", "Reset failed") }.getOrDefault("Reset failed")
+                Result.failure(Exception(msg))
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "sendPasswordReset error: ${e.message}")
+            Result.failure(e)
+        }
+    }
+
+    /**
      * Refresh the session using the stored refresh token.
      * POST https://[SUPABASE_URL]/auth/v1/token?grant_type=refresh_token
      *

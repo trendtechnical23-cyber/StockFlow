@@ -31,9 +31,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.database.FirebaseDatabase
-import com.google.firebase.firestore.FirebaseFirestore
+import com.trendstock.trendmobility.api.ApiClient
+import com.trendstock.trendmobility.api.StockTakeScanRequest
+import com.trendstock.trendmobility.auth.AuthManager
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.trendstock.trendmobility.api.InventoryItem
@@ -413,30 +413,8 @@ fun StockTakeScreenNew(
                                             val orgId = com.trendstock.trendmobility.utils.OrganizationManager.getCurrentOrganizationId()
                                             val session = currentSession
                                             if (!orgId.isNullOrBlank() && session != null) {
-                                                try {
-                                                    val indexDoc = com.google.firebase.firestore.FirebaseFirestore.getInstance()
-                                                        .collection("organizations").document(orgId)
-                                                        .collection("stockTakeIndex").document(item.itemId)
-                                                        .get().await()
-                                                    if (indexDoc.exists()) {
-                                                        val claimedSessionId = indexDoc.getString("sessionId")
-                                                        if (claimedSessionId != null && claimedSessionId != session.id) {
-                                                            // Verify the claiming session is still ACTIVE
-                                                            val claimingSession = com.google.firebase.firestore.FirebaseFirestore.getInstance()
-                                                                .collection("organizations").document(orgId)
-                                                                .collection("stockTakeSessions").document(claimedSessionId)
-                                                                .get().await()
-                                                            if (claimingSession.exists() && claimingSession.getString("status") == "ACTIVE") {
-                                                                crossDeviceConflict = indexDoc.data
-                                                                selectedItem = item
-                                                                showCrossDeviceBlockDialog = true
-                                                                return@launch
-                                                            }
-                                                        }
-                                                    }
-                                                } catch (e: Exception) {
-                                                    Log.w("StockTakeScreen", "⚠️ Cross-device check failed (allowing scan): ${e.message}")
-                                                }
+                                                // Cross-device conflict check removed (Firestore no longer used).
+                                                // Backend upsert on (session_id, item_id) handles duplicates safely.
                                             }
                                             quantityInput = ""
                                             selectedItem = item
@@ -667,21 +645,9 @@ fun StockTakeScreenNew(
                                     endedAt = System.currentTimeMillis()
                                 )
                                 saveSessionToList(context, completedSession)
-                                val endUser = FirebaseAuth.getInstance().currentUser
-                                val endUserName = endUser?.email?.substringBefore("@") ?: endUser?.displayName ?: "Unknown User"
+                                val endUserName = AuthManager.getEmail()?.substringBefore("@") ?: "Unknown User"
                                 broadcastStockTakeNotification(context, completedSession.id, "ENDED", completedSession.deviceName, endUserName)
-                                // Mark session COMPLETED in Firestore so dashboard stops listening to it
-                                try {
-                                    val orgId = com.trendstock.trendmobility.utils.OrganizationManager.getCurrentOrganizationId()
-                                    if (!orgId.isNullOrBlank()) {
-                                        com.google.firebase.firestore.FirebaseFirestore.getInstance()
-                                            .collection("organizations").document(orgId)
-                                            .collection("stockTakeSessions").document(completedSession.id)
-                                            .update(mapOf("status" to "COMPLETED", "endTime" to completedSession.endedAt)).await()
-                                    }
-                                } catch (e: Exception) {
-                                    Log.w("StockTakeScreen", "⚠️ Could not update session status: ${e.message}")
-                                }
+                                // Session status is managed server-side via the backend API.
                                 currentSession = null
                                 deleteActiveSession(context)
                                 savedSessions = loadSavedSessions(context)
@@ -720,21 +686,9 @@ fun StockTakeScreenNew(
                                     endedAt = System.currentTimeMillis()
                                 )
                                 saveSessionToList(context, completedSession)
-                                val endUser = FirebaseAuth.getInstance().currentUser
-                                val endUserName = endUser?.email?.substringBefore("@") ?: endUser?.displayName ?: "Unknown User"
+                                val endUserName = AuthManager.getEmail()?.substringBefore("@") ?: "Unknown User"
                                 broadcastStockTakeNotification(context, completedSession.id, "ENDED", completedSession.deviceName, endUserName)
-                                // Mark session COMPLETED in Firestore so dashboard stops listening to it
-                                try {
-                                    val orgId = com.trendstock.trendmobility.utils.OrganizationManager.getCurrentOrganizationId()
-                                    if (!orgId.isNullOrBlank()) {
-                                        com.google.firebase.firestore.FirebaseFirestore.getInstance()
-                                            .collection("organizations").document(orgId)
-                                            .collection("stockTakeSessions").document(completedSession.id)
-                                            .update(mapOf("status" to "COMPLETED", "endTime" to completedSession.endedAt)).await()
-                                    }
-                                } catch (e: Exception) {
-                                    Log.w("StockTakeScreen", "⚠️ Could not update session status: ${e.message}")
-                                }
+                                // Session status is managed server-side via the backend API.
                                 currentSession = null
                                 deleteActiveSession(context)
                                 savedSessions = loadSavedSessions(context)
@@ -1065,13 +1019,13 @@ fun StockTakeScreenNew(
 // physical device cannot see each other's stock-take sessions.
 
 private fun activeSessionPrefsName(context: Context): String {
-    val uid = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid ?: "anonymous"
+    val uid   = AuthManager.getUserId() ?: "anonymous"
     val orgId = com.trendstock.trendmobility.utils.OrganizationManager.getCurrentOrganizationId() ?: "noorg"
     return "StockTakeOffline_${uid}_${orgId}"
 }
 
 private fun savedSessionsPrefsName(context: Context): String {
-    val uid = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid ?: "anonymous"
+    val uid   = AuthManager.getUserId() ?: "anonymous"
     val orgId = com.trendstock.trendmobility.utils.OrganizationManager.getCurrentOrganizationId() ?: "noorg"
     return "SavedSessions_${uid}_${orgId}"
 }
@@ -1100,36 +1054,8 @@ private suspend fun startOfflineSession(context: Context): OfflineStockTakeSessi
     // Register device as active on dashboard
     registerDeviceAsActive(context, session)
 
-    // Write session doc to Firestore so dashboard can discover and subscribe to live scans
-    try {
-        val orgId = com.trendstock.trendmobility.utils.OrganizationManager.getCurrentOrganizationId()
-        val user = FirebaseAuth.getInstance().currentUser
-        if (!orgId.isNullOrBlank() && user != null) {
-            val uName = user.email?.substringBefore("@") ?: user.displayName ?: "Unknown"
-            com.google.firebase.firestore.FirebaseFirestore.getInstance()
-                .collection("organizations")
-                .document(orgId)
-                .collection("stockTakeSessions")
-                .document(sessionId)
-                .set(mapOf(
-                    "status" to "ACTIVE",
-                    "startTime" to now,
-                    "deviceId" to deviceId,
-                    "deviceName" to deviceName,
-                    "userName" to uName,
-                    "userId" to user.uid,
-                    "itemsScanned" to 0,
-                    "createdAt" to com.google.firebase.Timestamp.now()
-                )).await()
-            Log.d("StockTakeScreen", "📋 Session doc created in Firestore: $sessionId")
-        }
-    } catch (e: Exception) {
-        Log.w("StockTakeScreen", "⚠️ Could not create session doc: ${e.message}")
-    }
-
-    // Broadcast session start notification to all devices and dashboard
-    val currentUser = FirebaseAuth.getInstance().currentUser
-    val userName = currentUser?.email?.substringBefore("@") ?: currentUser?.displayName ?: "Unknown User"
+    // Session is tracked locally (SharedPreferences) and synced to backend on completion.
+    val userName = AuthManager.getEmail()?.substringBefore("@") ?: "Unknown User"
     broadcastStockTakeNotification(context, session.id, "STARTED", session.deviceName, userName)
     
     Log.d("StockTakeScreen", "📋 Started offline session: ${session.id}")
@@ -1284,151 +1210,52 @@ private suspend fun exportSessionToCSV(context: Context, session: OfflineStockTa
 
 private suspend fun syncSessionToDashboard(context: Context, session: OfflineStockTakeSession): Boolean {
     return try {
-        Log.d("StockTakeScreen", "🔄 Starting sync for session: ${session.id}")
-        
-        val firestore  = FirebaseFirestore.getInstance()
-        val deviceId   = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
-        val deviceName = Build.MODEL
-        val currentUser = FirebaseAuth.getInstance().currentUser
-        val userName = currentUser?.email?.substringBefore("@") ?: currentUser?.displayName ?: "Unknown User"
+        val orgId  = com.trendstock.trendmobility.utils.OrganizationManager.getCurrentOrganizationId()
+                     ?: getOrganizationId(context)
+        if (orgId.isNullOrBlank()) { Log.e("StockTakeScreen", "❌ No org ID for sync"); return false }
 
-        Log.d("StockTakeScreen", "👤 Current user: ${currentUser?.email}")
-        Log.d("StockTakeScreen", "📱 Device: $deviceName ($deviceId)")
-        
-        // Use OrganizationManager for consistency
-        val orgId = com.trendstock.trendmobility.utils.OrganizationManager.getCurrentOrganizationId()
-        if (orgId.isNullOrBlank()) {
-            Log.e("StockTakeScreen", "❌ No organization ID found - user may need to log in again")
-            // Try fallback method
-            val fallbackOrgId = getOrganizationId(context)
-            if (fallbackOrgId.isNullOrBlank()) {
-                Log.e("StockTakeScreen", "❌ Fallback organization ID also null")
-                return false
-            } else {
-                Log.d("StockTakeScreen", "🔄 Using fallback organization ID: $fallbackOrgId")
-                // Use fallback for the rest of the method
+        val token = AuthManager.getAccessToken()
+        if (token.isNullOrBlank()) { Log.e("StockTakeScreen", "❌ Not authenticated for sync"); return false }
+
+        val auth = "Bearer $token"
+
+        // Push each scanned item to backend stock-take scan endpoint
+        var ok = true
+        for (item in session.items) {
+            val resp = ApiClient.mobileService.recordStockTakeScan(
+                auth = auth,
+                body = StockTakeScanRequest(
+                    orgId            = orgId,
+                    sessionId        = session.id,
+                    itemId           = item.itemId,
+                    sku              = item.sku,
+                    itemName         = item.itemName,
+                    countedQuantity  = item.scannedQuantity,
+                    expectedQuantity = item.expectedQuantity,
+                )
+            )
+            if (!resp.isSuccessful) {
+                Log.w("StockTakeScreen", "⚠️ Scan sync failed for ${item.sku}: ${resp.body()?.message}")
+                ok = false
             }
         }
-        val finalOrgId = orgId ?: getOrganizationId(context)
-        if (finalOrgId.isNullOrBlank()) {
-            Log.e("StockTakeScreen", "❌ No valid organization ID available")
-            return false
-        }
-        Log.d("StockTakeScreen", "🏢 Organization ID: $finalOrgId")
-        
-        if (currentUser == null) {
-            Log.e("StockTakeScreen", "❌ User not authenticated - Firebase Auth user is null")
-            return false
-        }
-        
-        // Create Firestore session document (matches dashboard structure)
-        val sessionData = hashMapOf(
-            "organizationId" to finalOrgId,
-            "userId"         to currentUser.uid,
-            "userName"       to userName,
-            "deviceId"       to deviceId,
-            "deviceName"     to deviceName,
-            "status"         to "COMPLETED",
-            "startTime"      to session.startedAt,
-            "endTime"        to (session.endedAt ?: System.currentTimeMillis()),
-            "itemsScanned"   to session.items.size,
-            "scannedItems"   to session.items.map { item ->
-                hashMapOf(
-                    "itemId"           to item.itemId,
-                    "itemName"         to item.itemName,
-                    "sku"              to item.sku,
-                    "scannedQuantity"  to item.scannedQuantity,
-                    "expectedQuantity" to item.expectedQuantity,
-                    "variance"         to item.variance,
-                    "scannedAt"        to com.google.firebase.Timestamp(java.util.Date(item.scannedAt)),
-                    "scannedBy"        to currentUser.email,
-                    "scannedByName"    to userName,
-                    "deviceId"         to deviceId,
-                    "deviceName"       to deviceName,
-                    "source"           to "mobile_app"
-                )
-            },
-            "createdAt" to com.google.firebase.firestore.FieldValue.serverTimestamp(),
-            "updatedAt" to com.google.firebase.firestore.FieldValue.serverTimestamp(),
-            "source"    to "mobile_app_sync"
-        )
-        
-        Log.d("StockTakeScreen", "📄 Session data prepared with ${session.items.size} items")
-        
-        // Write to Firestore stockTakeSessions collection
-        val docPath = "organizations/$finalOrgId/stockTakeSessions/${session.id}"
-        Log.d("StockTakeScreen", "📍 Writing to Firestore path: $docPath")
-        
-        firestore.collection("organizations")
-            .document(finalOrgId)
-            .collection("stockTakeSessions")
-            .document(session.id)
-            .set(sessionData)
-            .await()
-        
-        // Console log for dashboard debugging
-        Log.d("StockTakeScreen", "📤 SESSION SYNCED TO DASHBOARD: ${session.id}")
-        Log.d("StockTakeScreen", "📍 Firestore path: organizations/$finalOrgId/stockTakeSessions/${session.id}")
-        Log.d("StockTakeScreen", "👤 User ID: ${currentUser.uid}")
-        Log.d("StockTakeScreen", "🏢 Org ID: $finalOrgId")
-        Log.d("StockTakeScreen", "📊 Items synced: ${session.items.size}")
-        Log.d("StockTakeScreen", "✅ Successfully synced session to Firestore: ${session.id}")
-        true
+
+        Log.d("StockTakeScreen", "✅ Session sync complete: ${session.items.size} items, ok=$ok")
+        ok
     } catch (e: Exception) {
-        Log.e("StockTakeScreen", "❌ Failed to sync session to Firestore - Error type: ${e.javaClass.simpleName}")
-        Log.e("StockTakeScreen", "❌ Error message: ${e.message}")
-        Log.e("StockTakeScreen", "❌ Stack trace: ${e.stackTraceToString()}")
+        Log.e("StockTakeScreen", "❌ syncSessionToDashboard error: ${e.message}")
         false
     }
 }
 
 private suspend fun registerDeviceAsActive(context: Context, session: OfflineStockTakeSession) {
-    try {
-        val database = FirebaseDatabase.getInstance().reference
-        val deviceId = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
-        val orgId = com.trendstock.trendmobility.utils.OrganizationManager.getCurrentOrganizationId()
-        if (orgId.isNullOrBlank()) {
-            Log.e("StockTakeScreen", "❌ No org ID for device registration")
-            return
-        }
-        
-        val deviceRef = database.child("activeStockTakeDevices").child(orgId).child(deviceId)
-        val deviceData = mapOf(
-            "deviceId" to deviceId,
-            "deviceName" to Build.MODEL,
-            "sessionId" to session.id,
-            "startedAt" to session.startedAt,
-            "status" to "ACTIVE",
-            "itemsScanned" to 0,
-            "lastActivity" to System.currentTimeMillis(),
-            "userEmail" to (com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.email ?: "")
-        )
-        deviceRef.setValue(deviceData).await()
-        
-        Log.d("StockTakeScreen", "📱 Device registered as active: ${Build.MODEL} under org: $orgId")
-    } catch (e: Exception) {
-        Log.e("StockTakeScreen", "❌ Failed to register device as active: ${e.message}")
-    }
+    // RTDB removed — device registration is handled by the scan entries written to the backend.
+    Log.d("StockTakeScreen", "📱 Session started locally: ${session.id}")
 }
 
 private suspend fun updateDeviceProgress(context: Context, session: OfflineStockTakeSession) {
-    try {
-        val database = FirebaseDatabase.getInstance().reference
-        val deviceId = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
-        val orgId = com.trendstock.trendmobility.utils.OrganizationManager.getCurrentOrganizationId()
-        if (orgId.isNullOrBlank()) return
-        
-        val deviceRef = database.child("activeStockTakeDevices").child(orgId).child(deviceId)
-        val updateData = mapOf(
-            "itemsScanned" to session.items.size,
-            "lastActivity" to System.currentTimeMillis()
-        )
-        deviceRef.updateChildren(updateData).await()
-        
-        Log.d("StockTakeScreen", "📊 Device progress updated: ${session.items.size} items")
-    } catch (e: Exception) {
-        Log.e("StockTakeScreen", "❌ Failed to update device progress: ${e.message}")
-    }
+    // RTDB removed — progress is tracked locally and synced on session completion.
+    Log.d("StockTakeScreen", "📊 Local progress: ${session.items.size} items scanned")
 }
 
 private fun endSession(context: Context, session: OfflineStockTakeSession) {
@@ -1438,23 +1265,7 @@ private fun endSession(context: Context, session: OfflineStockTakeSession) {
     )
     saveOfflineSession(context, updatedSession)
     
-    // Update device status in RTDB so dashboard sees the session ended
-    try {
-        val database = FirebaseDatabase.getInstance().reference
-        val deviceId = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
-        val orgId = com.trendstock.trendmobility.utils.OrganizationManager.getCurrentOrganizationId()
-        if (!orgId.isNullOrBlank()) {
-            val deviceRef = database.child("activeStockTakeDevices").child(orgId).child(deviceId)
-            val endData = mapOf<String, Any>(
-                "status" to "COMPLETED",
-                "endedAt" to System.currentTimeMillis(),
-                "itemsScanned" to session.items.size
-            )
-            deviceRef.updateChildren(endData)
-        }
-    } catch (e: Exception) {
-        Log.e("StockTakeScreen", "Failed to update device RTDB status on end: ${e.message}")
-    }
+    // RTDB removed — session end is tracked locally; synced to backend on export.
 }
 
 private fun deleteSession(context: Context, session: OfflineStockTakeSession) {
@@ -1563,53 +1374,29 @@ private fun getOrganizationId(context: Context): String? {
 private suspend fun syncScanToFirestore(
     context: Context,
     sessionId: String,
-    item: OfflineStockTakeItem
+    item: OfflineStockTakeItem,
 ) {
+    // Live scan is now posted to the backend; Firestore is no longer used.
     try {
         val orgId = com.trendstock.trendmobility.utils.OrganizationManager.getCurrentOrganizationId()
         if (orgId.isNullOrBlank()) return
-        val user = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser ?: return
-        val userName = user.email?.substringBefore("@") ?: user.displayName ?: "Unknown"
+        val token = AuthManager.getAccessToken() ?: return
 
-        val scanDoc = hashMapOf(
-            "itemId" to item.itemId,
-            "itemName" to item.itemName,
-            "sku" to item.sku,
-            "scannedQuantity" to item.scannedQuantity,
-            "deviceId" to item.deviceId,
-            "userName" to userName,
-            "userId" to user.uid,
-            "scannedAt" to com.google.firebase.Timestamp.now()
+        ApiClient.mobileService.recordStockTakeScan(
+            auth = "Bearer $token",
+            body = StockTakeScanRequest(
+                orgId            = orgId,
+                sessionId        = sessionId,
+                itemId           = item.itemId,
+                sku              = item.sku,
+                itemName         = item.itemName,
+                countedQuantity  = item.scannedQuantity,
+                expectedQuantity = item.expectedQuantity,
+            )
         )
-
-        com.google.firebase.firestore.FirebaseFirestore.getInstance()
-            .collection("organizations")
-            .document(orgId)
-            .collection("stockTakeSessions")
-            .document(sessionId)
-            .collection("scans")
-            .document(item.itemId)
-            .set(scanDoc)
-            .await()
-
-        Log.d("StockTakeScreen", "📡 Live scan synced: ${item.sku}")
-
-        // Write to shared scan index so other devices can detect cross-device conflicts
-        com.google.firebase.firestore.FirebaseFirestore.getInstance()
-            .collection("organizations")
-            .document(orgId)
-            .collection("stockTakeIndex")
-            .document(item.itemId)
-            .set(mapOf(
-                "sessionId" to sessionId,
-                "deviceId" to item.deviceId,
-                "userName" to userName,
-                "scannedAt" to com.google.firebase.Timestamp.now()
-            )).await()
-
+        Log.d("StockTakeScreen", "📡 Scan posted to backend: ${item.sku}")
     } catch (e: Exception) {
-        // Non-fatal: offline-first, this is best-effort
-        Log.w("StockTakeScreen", "⚠️ Live scan sync failed (will sync later): ${e.message}")
+        Log.w("StockTakeScreen", "⚠️ Scan sync failed (offline-first, ok): ${e.message}")
     }
 }
 
@@ -1626,33 +1413,22 @@ private suspend fun broadcastStockTakeNotification(
             Log.e("StockTakeScreen", "❌ Cannot broadcast notification: no org ID")
             return
         }
-        val user = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser ?: return
+        val token = AuthManager.getAccessToken() ?: return
 
-        val title = if (eventType == "STARTED") "Stock Take Started" else "Stock Take Ended"
-        val message = if (eventType == "STARTED")
-            "A stock take session started by $userName on $deviceName"
-        else
-            "Stock take session by $userName on $deviceName has ended"
-
-        val notification = hashMapOf(
-            "type" to "stock_take_session",
-            "targetUserId" to "ALL",
-            "title" to title,
-            "message" to message,
-            "sessionId" to sessionId,
-            "eventType" to eventType,
-            "deviceName" to deviceName,
-            "userName" to userName,
-            "createdBy" to user.uid,
-            "createdAt" to com.google.firebase.Timestamp.now()
+        // Post activity to backend; dashboard is notified via FCM from the backend.
+        ApiClient.mobileService.logActivity(
+            auth = "Bearer $token",
+            body = com.trendstock.trendmobility.api.ActivityRequest(
+                orgId    = orgId,
+                type     = "stock_take_session",
+                itemId   = null,
+                itemName = null,
+                quantity = null,
+                action   = if (eventType == "STARTED") "Stock Take Started by $userName on $deviceName"
+                           else "Stock Take Ended by $userName on $deviceName",
+                details  = mapOf("sessionId" to sessionId, "eventType" to eventType, "deviceName" to deviceName),
+            )
         )
-
-        com.google.firebase.firestore.FirebaseFirestore.getInstance()
-            .collection("organizations")
-            .document(orgId)
-            .collection("notifications")
-            .add(notification)
-            .await()
 
         Log.d("StockTakeScreen", "📢 Broadcast notification sent: $eventType for session $sessionId")
     } catch (e: Exception) {

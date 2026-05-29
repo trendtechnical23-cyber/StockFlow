@@ -8,6 +8,7 @@ import com.trendstock.trendmobility.utils.OrganizationManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
@@ -117,6 +118,18 @@ class InventoryRepository private constructor(private val context: Context) {
             Log.d(TAG, "🔔 FCM-triggered inventory refresh")
             refreshInventory(forceRefresh = true)
         }
+    }
+
+    // ── Realtime sync stubs (kept for callers — FCM-driven, no Firestore) ────────
+
+    /** No-op: inventory sync is now FCM-driven. Kept so callers compile. */
+    suspend fun setupRealtimeSync() {
+        android.util.Log.d("InventoryRepository", "setupRealtimeSync: FCM-driven, no listener to set up")
+    }
+
+    /** No-op: no Firestore listener to tear down. */
+    fun stopRealtimeSync() {
+        android.util.Log.d("InventoryRepository", "stopRealtimeSync: nothing to stop")
     }
 
     // ── Cache utilities ────────────────────────────────────────────────────────

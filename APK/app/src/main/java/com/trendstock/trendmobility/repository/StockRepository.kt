@@ -25,10 +25,8 @@ class StockRepository(
         .asLiveData()
 
     init {
-        // Ensure realtime sync is running and cache is seeded even if HomeScreen
-        // has not been visited yet (e.g. cold start directly into a stock screen).
+        // Seed cache on cold start if stale (FCM handles live updates).
         CoroutineScope(Dispatchers.IO).launch {
-            inventoryRepository.setupRealtimeSync()
             if (!inventoryRepository.isCacheValid()) {
                 inventoryRepository.refreshInventory(forceRefresh = false)
             }

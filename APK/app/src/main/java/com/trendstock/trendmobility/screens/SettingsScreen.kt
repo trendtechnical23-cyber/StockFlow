@@ -19,12 +19,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.trendstock.trendmobility.auth.AuthManager
 import com.trendstock.trendmobility.services.FCMTokenManager
+import com.trendstock.trendmobility.services.RealTimeNotificationService
 import com.trendstock.trendmobility.utils.PreferencesManager
-import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.tasks.await
 import android.widget.Toast
 import android.content.Context
 
@@ -38,8 +37,7 @@ fun SettingsScreen(
     val fcmTokenManager = FCMTokenManager.getInstance(context)
     val prefsManager = remember { PreferencesManager.getInstance(context) }
     val scope = rememberCoroutineScope()
-    val auth = FirebaseAuth.getInstance()
-    val firestore = FirebaseFirestore.getInstance()
+    // Auth and data now via AuthManager / Supabase — no Firebase Auth or Firestore
     
     // Load saved preferences
     var isDarkMode by remember { mutableStateOf(prefsManager.getBoolean("dark_mode", false)) }
@@ -388,7 +386,7 @@ fun SettingsScreen(
                         title = "Test Notifications",
                         subtitle = "Send a test push notification",
                         onClick = {
-                            fcmTokenManager.sendTestNotification()
+                            RealTimeNotificationService.getInstance(context).sendTestNotification()
                         }
                     )
                     
@@ -441,18 +439,8 @@ fun SettingsScreen(
                     onClick = {
                         when (selectedAction) {
                             "export" -> {
-                                isLoading = true
-                                scope.launch {
-                                    try {
-                                        exportDataToFirebase(context, firestore, auth)
-                                        isLoading = false
-                                        showConfirmationModal = false
-                                        Toast.makeText(context, "Data exported successfully", Toast.LENGTH_SHORT).show()
-                                    } catch (e: Exception) {
-                                        isLoading = false
-                                        Toast.makeText(context, "Export failed: ${e.message}", Toast.LENGTH_LONG).show()
-                                    }
-                                }
+                                showConfirmationModal = false
+                                Toast.makeText(context, "Export is not supported in this version.", Toast.LENGTH_SHORT).show()
                             }
                             "password" -> {
                                 showConfirmationModal = false
@@ -540,7 +528,7 @@ fun SettingsScreen(
     
     // Password Reset Dialog
     if (showPasswordDialog) {
-        var email by remember { mutableStateOf(auth.currentUser?.email ?: "") }
+        var email by remember { mutableStateOf(AuthManager.getEmail() ?: "") }
         AlertDialog(
             onDismissRequest = { showPasswordDialog = false },
             title = { Text("Reset Password") },
@@ -567,14 +555,13 @@ fun SettingsScreen(
                         if (email.isNotBlank()) {
                             isLoading = true
                             scope.launch {
-                                try {
-                                    auth.sendPasswordResetEmail(email).await()
-                                    isLoading = false
-                                    showPasswordDialog = false
+                                val result = AuthManager.sendPasswordReset(email)
+                                isLoading = false
+                                showPasswordDialog = false
+                                if (result.isSuccess) {
                                     Toast.makeText(context, "Password reset email sent to $email", Toast.LENGTH_LONG).show()
-                                } catch (e: Exception) {
-                                    isLoading = false
-                                    Toast.makeText(context, "Failed to send reset email: ${e.message}", Toast.LENGTH_LONG).show()
+                                } else {
+                                    Toast.makeText(context, "Failed: ${result.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
                                 }
                             }
                         } else {
@@ -618,7 +605,8 @@ private fun updateNotificationSettings(
         "systemNotifications" to notificationsEnabled
     )
     
-    fcmTokenManager.updateNotificationSettings(settings)
+    // Notification settings are saved locally via prefsManager — no Firestore write needed
+    android.util.Log.d("SettingsScreen", "Notification settings updated locally")
 }
 
 @Composable
@@ -694,43 +682,7 @@ fun SettingsItem(
     }
 }
 
-/**
- * Export data to Firebase backup collection
- */
-private suspend fun exportDataToFirebase(
-    context: Context,
-    firestore: FirebaseFirestore,
-    auth: FirebaseAuth
-) {
-    val user = auth.currentUser ?: throw Exception("User not logged in")
-    val orgManager = com.trendstock.trendmobility.utils.OrganizationManager.getInstance()
-    val orgId = orgManager.getCurrentOrganizationId() ?: throw Exception("No organization selected")
-    
-    val timestamp = System.currentTimeMillis()
-    val backupData = mutableMapOf<String, Any>()
-    
-    // Export inventory data
-    val inventorySnapshot = firestore
-        .collection("organizations")
-        .document(orgId)
-        .collection("inventory")
-        .get()
-        .await()
-    
-    backupData["inventory"] = inventorySnapshot.documents.map { it.data ?: emptyMap<String, Any>() }
-    backupData["exportedAt"] = timestamp
-    backupData["exportedBy"] = user.uid
-    backupData["itemCount"] = inventorySnapshot.size()
-    
-    // Save backup to Firestore
-    firestore
-        .collection("organizations")
-        .document(orgId)
-        .collection("backups")
-        .document(timestamp.toString())
-        .set(backupData)
-        .await()
-}
+// exportDataToFirebase removed — Firestore no longer in use.
 
 /**
  * Clear all local data

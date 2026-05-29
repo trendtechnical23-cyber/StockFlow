@@ -82,24 +82,11 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
     /**
      * Setup real-time sync listeners
      */
-    fun setupRealtimeSync() {
-        viewModelScope.launch {
-            try {
-                repository.setupRealtimeSync()
-                Log.d(TAG, "🔄 Real-time sync enabled")
-            } catch (e: Exception) {
-                Log.e(TAG, "Error setting up real-time sync", e)
-            }
-        }
-    }
-    
-    /**
-     * Stop real-time sync listeners
-     */
-    fun stopRealtimeSync() {
-        repository.stopRealtimeSync()
-        Log.d(TAG, "🛑 Real-time sync disabled")
-    }
+    /** No-op — inventory sync is FCM-driven. Kept so callers compile. */
+    fun setupRealtimeSync() { Log.d(TAG, "setupRealtimeSync: FCM-driven") }
+
+    /** No-op — no Firestore listener to tear down. */
+    fun stopRealtimeSync() { Log.d(TAG, "stopRealtimeSync: nothing to stop") }
     
     /**
      * Search inventory by name or SKU
