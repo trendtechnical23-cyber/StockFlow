@@ -89,17 +89,22 @@ class FirebaseService(private val context: Context) {
                 val itemSKU  = cached?.sku  ?: stockId
                 val delta    = if (changeType == "stock_in") quantity else quantity
 
+                // Generate idempotency key: stable per (item, changeType, quantity, reason)
+                // so retrying the exact same request never creates a duplicate
+                val idempotencyKey = java.util.UUID.randomUUID().toString()
+
                 val response = ApiClient.mobileService.submitApproval(
                     auth = "Bearer $accessToken",
                     body = ApprovalRequest(
-                        orgId         = orgId,
-                        itemId        = stockId,
-                        itemName      = itemName,
-                        itemSKU       = itemSKU,
-                        changeType    = changeType,
-                        quantityDelta = delta,
-                        reason        = reason,
-                        deviceName    = android.os.Build.MODEL,
+                        orgId            = orgId,
+                        itemId           = stockId,
+                        itemName         = itemName,
+                        itemSKU          = itemSKU,
+                        changeType       = changeType,
+                        quantityDelta    = delta,
+                        reason           = reason,
+                        deviceName       = android.os.Build.MODEL,
+                        idempotencyKey   = idempotencyKey,
                     ),
                 )
 
@@ -155,6 +160,7 @@ class FirebaseService(private val context: Context) {
                         itemName         = itemName,
                         countedQuantity  = scannedQuantity,
                         expectedQuantity = expected,
+                        idempotencyKey   = "${sessionId}_${stockId}",
                     ),
                 )
 

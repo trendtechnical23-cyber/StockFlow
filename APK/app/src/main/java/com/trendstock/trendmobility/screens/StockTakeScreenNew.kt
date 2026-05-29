@@ -1231,6 +1231,8 @@ private suspend fun syncSessionToDashboard(context: Context, session: OfflineSto
                     itemName         = item.itemName,
                     countedQuantity  = item.scannedQuantity,
                     expectedQuantity = item.expectedQuantity,
+                    // Stable key = sessionId + itemId: retries produce same result
+                    idempotencyKey   = "${session.id}_${item.itemId}",
                 )
             )
             if (!resp.isSuccessful) {
@@ -1391,6 +1393,7 @@ private suspend fun syncScanToFirestore(
                 itemName         = item.itemName,
                 countedQuantity  = item.scannedQuantity,
                 expectedQuantity = item.expectedQuantity,
+                idempotencyKey   = "${sessionId}_${item.itemId}",
             )
         )
         Log.d("StockTakeScreen", "📡 Scan posted to backend: ${item.sku}")

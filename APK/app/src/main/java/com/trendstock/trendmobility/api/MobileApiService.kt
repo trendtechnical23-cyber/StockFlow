@@ -30,14 +30,15 @@ data class MobileInventoryResponse(
 )
 
 data class ApprovalRequest(
-    val orgId:         String,
-    val itemId:        String,
-    val itemName:      String?,
-    val itemSKU:       String?,
-    val changeType:    String,      // "stock_in" or "stock_out"
-    val quantityDelta: Int,
-    val reason:        String?,
-    val deviceName:    String?,
+    val orgId:           String,
+    val itemId:          String,
+    val itemName:        String?,
+    val itemSKU:         String?,
+    val changeType:      String,       // "stock_in" or "stock_out"
+    val quantityDelta:   Int,
+    val reason:          String?,
+    val deviceName:      String?,
+    val idempotencyKey:  String? = null,  // UUID generated per submission; prevents duplicates on retry
 )
 
 data class ApprovalResponse(
@@ -70,6 +71,7 @@ data class StockTakeScanRequest(
     val itemName:          String?,
     val countedQuantity:   Int,
     val expectedQuantity:  Int?,
+    val idempotencyKey:    String? = null,  // prevents duplicate scans on retry
 )
 
 data class DeleteFcmTokenRequest(
@@ -142,4 +144,6 @@ data class FcmRegistrationRequest(
     val deviceToken: String,
     val platform:    String = "android",
     val orgId:       String,
+    val deviceId:    String? = null,   // Android: Settings.Secure.ANDROID_ID
+    val appVersion:  String? = null,
 )

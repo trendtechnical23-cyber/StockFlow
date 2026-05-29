@@ -3,6 +3,7 @@ package com.trendstock.trendmobility.services
 import android.content.Context
 import android.content.SharedPreferences
 import android.os.Build
+import android.provider.Settings
 import android.util.Log
 import com.google.firebase.messaging.FirebaseMessaging
 import com.trendstock.trendmobility.api.ApiClient
@@ -106,12 +107,25 @@ class FCMTokenManager private constructor(private val context: Context) {
                     return@launch
                 }
 
+                // Stable Android device identifier — survives app reinstall,
+                // changes only on factory reset (which is the intended behavior)
+                val androidId = Settings.Secure.getString(
+                    context.contentResolver,
+                    Settings.Secure.ANDROID_ID
+                )
+
+                val appVersion = runCatching {
+                    context.packageManager.getPackageInfo(context.packageName, 0).versionName
+                }.getOrNull()
+
                 val response = ApiClient.mobileService.registerFcmToken(
                     auth = "Bearer $accessToken",
                     body = FcmRegistrationRequest(
                         deviceToken = token,
                         platform    = "android",
                         orgId       = orgId,
+                        deviceId    = androidId,
+                        appVersion  = appVersion,
                     ),
                 )
 

@@ -1,14 +1,11 @@
 /**
  * /api/mobile — Endpoints consumed exclusively by the Android APK.
  *
- * Every route is protected by verifyFirebaseToken (Supabase JWT).
- * The middleware resolves req.user.orgId from public.users so handlers
- * don't need a second lookup.
- *
- * What this replaces in the APK:
- *   • Firestore reads/writes (inventory, approvals, notifications, sessions)
- *   • Realtime Database reads/writes (stock-take sessions)
- *   • Direct Firebase Auth token fetching
+ * Schema: 003_enterprise_improvements (v3)
+ * - inventory_items has NO quantity column — stock comes from inventory_balances
+ * - stock_take_entries uses counted_qty / expected_qty / counted_by / counted_at
+ * - notifications table GONE — use fn_notify_managers RPC
+ * - users.role renamed to users.legacy_role
  */
 
 const express = require('express');
@@ -16,49 +13,39 @@ const router  = express.Router();
 const { supabase }            = require('../supabaseAdmin');
 const { verifyFirebaseToken } = require('../middleware/auth');
 
-// ── 1. Org resolution ─────────────────────────────────────────────────────────
+// ── 1. Org resolution ──────────────────────────────────────────────────────────
 
 /**
  * GET /api/mobile/user-org
- * Returns the org UUID for the authenticated user.
- * APK calls this once right after Supabase login to resolve the org.
  */
 router.get('/user-org', verifyFirebaseToken, async (req, res) => {
   let { orgId, uid, email, role } = req.user;
 
-  // Auth middleware already tried UID + email fallback.
-  // If orgId is still null do one final direct lookup so a misconfigured
-  // middleware never silently blocks a valid user.
   if (!orgId) {
     console.warn(`[user-org] orgId missing for ${email} — running direct lookup`);
-    // Two separate queries are safer than .or() with mixed UUID/text types
+
     const { data: byUid } = await supabase
-      .from('users').select('org_id, role').eq('id', uid).maybeSingle();
+      .from('users')
+      .select('org_id, legacy_role')   // ← was 'role', now 'legacy_role'
+      .eq('id', uid)
+      .maybeSingle();
+
     const { data: byEmail } = !byUid
-      ? await supabase.from('users').select('org_id, role').eq('email', email).maybeSingle()
+      ? await supabase.from('users').select('org_id, legacy_role').eq('email', email).maybeSingle()
       : { data: null };
+
     const row = byUid || byEmail;
+    orgId = row?.org_id      ?? null;
+    role  = row?.legacy_role ?? role;   // ← was 'row?.role'
 
-    orgId = row?.org_id ?? null;
-    role  = row?.role   ?? role;
-    console.warn(`[user-org] direct lookup result — byUid:${!!byUid} byEmail:${!!byEmail} orgId:${orgId}`);
-
-    if (orgId) {
-      console.log(`[user-org] ✅ Resolved org ${orgId} via direct lookup for ${email}`);
-    }
+    console.warn(`[user-org] direct lookup — byUid:${!!byUid} byEmail:${!!byEmail} orgId:${orgId}`);
   }
 
   if (!orgId) {
-    // Last resort: if there is exactly one organisation in the system, use it.
-    // This handles the case where public.users.org_id was never set for the owner.
-    const { data: orgs } = await supabase
-      .from('organizations')
-      .select('id')
-      .limit(2);
-
-    if (orgs && orgs.length === 1) {
+    const { data: orgs } = await supabase.from('organizations').select('id').limit(2);
+    if (orgs?.length === 1) {
       orgId = orgs[0].id;
-      console.warn(`[user-org] ⚠️  Resolved org ${orgId} via single-org fallback for ${email}. Update public.users.org_id to fix permanently.`);
+      console.warn(`[user-org] ⚠️  single-org fallback: ${orgId} for ${email}`);
     }
   }
 
@@ -66,18 +53,20 @@ router.get('/user-org', verifyFirebaseToken, async (req, res) => {
     console.error(`[user-org] ❌ Could not resolve org for uid=${uid} email=${email}`);
     return res.status(404).json({
       success: false,
-      message: 'No organisation linked to this account. In Supabase, set org_id in the public.users row for this email.',
+      message: 'No organisation linked to this account.',
     });
   }
 
   res.json({ success: true, data: { orgId, userId: uid, email, role } });
 });
 
-// ── 2. Inventory ──────────────────────────────────────────────────────────────
+// ── 2. Inventory ───────────────────────────────────────────────────────────────
 
 /**
  * GET /api/mobile/inventory?orgId=UUID
- * All active inventory items for the org, shaped for the APK's Room cache.
+ *
+ * Returns active items with current stock levels.
+ * Stock quantity is read from inventory_balances (NOT inventory_items.quantity).
  */
 router.get('/inventory', verifyFirebaseToken, async (req, res) => {
   const orgId = req.query.orgId || req.user.orgId;
@@ -86,91 +75,151 @@ router.get('/inventory', verifyFirebaseToken, async (req, res) => {
     return res.status(403).json({ success: false, message: 'Access denied' });
 
   try {
-    const { data, error } = await supabase
-      .from('inventory_items')
-      .select('id, sku, name, quantity, min_quantity, unit_price, unit, category, source, is_active')
-      .eq('org_id', orgId)
-      .eq('is_active', true)
-      .order('name');
+    // Use the org stock summary RPC — returns items + current_stock from balances
+    const { data, error } = await supabase.rpc('rpc_get_org_stock_summary', {
+      p_org_id: orgId,
+    });
 
     if (error) throw error;
 
-    const items = (data || []).map(r => ({
-      itemId:            r.id,
+    // Fetch unit abbreviations for display (separate small query)
+    const { data: items, error: itemErr } = await supabase
+      .from('inventory_items')
+      .select(`
+        id, metadata,
+        unit:units_of_measure!inventory_items_unit_id_fkey ( abbreviation, name ),
+        category:categories!inventory_items_category_id_fkey ( name )
+      `)
+      .eq('org_id', orgId)
+      .eq('is_active', true)
+      .is('deleted_at', null);
+
+    if (itemErr) throw itemErr;
+
+    // Build lookup maps for unit/category names
+    const unitMap     = {};
+    const categoryMap = {};
+    (items || []).forEach(i => {
+      unitMap[i.id]     = i.unit?.abbreviation ?? i.unit?.name ?? i.metadata?.unit ?? null;
+      categoryMap[i.id] = i.category?.name ?? i.metadata?.category ?? null;
+    });
+
+    const result = (data || []).map(r => ({
+      itemId:            r.item_id,
       name:              r.name,
       sku:               r.sku,
-      quantityAvailable: r.quantity     ?? 0,
-      unit:              r.unit         ?? null,
-      rate:              r.unit_price   ?? null,
-      minQuantity:       r.min_quantity ?? 10,
-      category:          r.category     ?? null,
-      source:            r.source       ?? 'manual',
+      quantityAvailable: Number(r.current_stock ?? 0),   // APK Room cache field
+      unit:              unitMap[r.item_id]     ?? null,
+      rate:              r.unit_price           ?? null,  // APK uses 'rate' for unit_price
+      minQuantity:       r.minimum_stock        ?? 0,
+      category:          categoryMap[r.item_id] ?? null,
+      isLowStock:        !!r.is_low_stock,
+      isOutOfStock:      !!r.is_out_of_stock,
+      isPriority:        !!r.is_priority,
+      source:            'supabase',
     }));
 
-    res.json({ success: true, data: { items, totalItems: items.length } });
+    res.json({ success: true, data: { items: result, totalItems: result.length } });
   } catch (err) {
     console.error('[mobile/inventory]', err.message);
     res.status(500).json({ success: false, message: err.message });
   }
 });
 
-// ── 3. Approval requests ──────────────────────────────────────────────────────
+// ── 3. Approval requests ───────────────────────────────────────────────────────
 
 /**
  * POST /api/mobile/approvals
- * Submit a stock-change approval from the APK (stock_in or stock_out).
- * Inventory is NOT updated until a dashboard admin approves.
+ * Submit a stock-change approval from the APK.
  *
- * Body: { orgId, itemId, itemName, itemSKU, changeType, quantityDelta, reason, deviceName }
+ * Body: { orgId, itemId, itemName, itemSKU, changeType, quantityDelta, reason, deviceName, idempotencyKey? }
  */
 router.post('/approvals', verifyFirebaseToken, async (req, res) => {
-  const { orgId, itemId, itemName, itemSKU, changeType, quantityDelta, reason, deviceName } = req.body;
+  const {
+    orgId, itemId, itemName, itemSKU,
+    changeType, quantityDelta, reason,
+    deviceName, idempotencyKey,
+  } = req.body;
+
   const actorId   = req.user.uid;
   const actorName = req.user.email;
 
   if (!orgId || !itemId || !changeType || quantityDelta == null)
-    return res.status(400).json({ success: false, message: 'Missing required fields: orgId, itemId, changeType, quantityDelta' });
+    return res.status(400).json({ success: false, message: 'Missing: orgId, itemId, changeType, quantityDelta' });
   if (req.user.orgId && req.user.orgId !== orgId)
     return res.status(403).json({ success: false, message: 'Access denied' });
 
-  const delta = changeType === 'stock_out' ? -Math.abs(Number(quantityDelta)) : Math.abs(Number(quantityDelta));
+  const delta = changeType === 'stock_out'
+    ? -Math.abs(Number(quantityDelta))
+    :  Math.abs(Number(quantityDelta));
 
   try {
-    // Insert approval request
+    // Idempotency: if key provided and already exists, return the existing approval
+    if (idempotencyKey) {
+      const { data: existing } = await supabase
+        .from('approval_requests')
+        .select('id')
+        .eq('org_id', orgId)
+        .eq('idempotency_key', idempotencyKey)
+        .maybeSingle();
+
+      if (existing) {
+        console.log(`[mobile/approvals] idempotent return for key=${idempotencyKey}`);
+        return res.json({ success: true, message: 'Approval request submitted', data: { approvalId: existing.id } });
+      }
+    }
+
+    // Insert approval request (v3 schema)
     const { data: approval, error: approvalErr } = await supabase
       .from('approval_requests')
       .insert({
-        org_id:       orgId,
-        type:         'stock_adjustment',
-        item_id:      itemId,
+        org_id:          orgId,
+        type:            'stock_adjustment',
+        reference_type:  'apk',
+        item_id:         itemId,
         delta,
-        reason:       reason || `${changeType === 'stock_in' ? 'Stock In' : 'Stock Out'} via mobile app`,
-        requested_by: actorId,
-        status:       'pending',
+        reason:          reason || `${changeType === 'stock_in' ? 'Stock In' : 'Stock Out'} via mobile`,
+        requested_by:    actorId,
+        status:          'pending',
+        idempotency_key: idempotencyKey || null,
+        metadata: {
+          source:     'apk',
+          deviceName: deviceName || null,
+          itemName:   itemName   || null,
+          itemSKU:    itemSKU    || null,
+          changeType,
+        },
       })
       .select('id')
       .single();
 
     if (approvalErr) throw approvalErr;
 
-    // Dashboard notification
-    await supabase.from('notifications').insert({
-      org_id:  orgId,
-      title:   'Approval Required',
-      body:    `${actorName} (${deviceName || 'Mobile'}) requested ${delta > 0 ? '+' : ''}${delta} units for ${itemName || itemSKU}.`,
-      type:    'approval_pending',
-      data:    { approvalId: approval.id, itemId, itemName, itemSKU, changeType, quantityDelta: delta, source: 'mobile_app' },
-      is_read: false,
+    // Notify managers via new split-notification RPC
+    // fn_notify_managers inserts notification_events + notification_recipients rows
+    const { error: notifErr } = await supabase.rpc('fn_notify_managers', {
+      p_org_id: orgId,
+      p_type:   'approval_pending',
+      p_title:  '🔔 Approval Required',
+      p_body:   `${actorName} (${deviceName || 'Mobile'}) requested ${delta > 0 ? '+' : ''}${delta} units for ${itemName || itemSKU || 'an item'}.`,
+      p_data:   {
+        approvalId: approval.id,
+        itemId, itemName, itemSKU,
+        changeType, delta,
+        source: 'apk',
+      },
     });
+
+    if (notifErr) console.warn('[mobile/approvals] notification insert failed:', notifErr.message);
 
     // Activity log
     await supabase.from('activity_logs').insert({
       org_id:      orgId,
-      type:        changeType === 'stock_in' ? 'stock_in' : 'stock_out',
-      entity_type: 'inventory',
-      entity_id:   itemId,
-      actor_id:    actorId,
-      details: { itemName, itemSKU, changeType, delta, reason, deviceName, approvalId: approval.id, source: 'apk', status: 'pending_approval' },
+      user_id:     actorId,
+      action:      changeType === 'stock_in' ? 'submit_stock_in' : 'submit_stock_out',
+      entity_type: 'approval_request',
+      entity_id:   approval.id,
+      details: { itemName, itemSKU, changeType, delta, reason, deviceName, source: 'apk' },
     });
 
     res.json({ success: true, message: 'Approval request submitted', data: { approvalId: approval.id } });
@@ -180,13 +229,10 @@ router.post('/approvals', verifyFirebaseToken, async (req, res) => {
   }
 });
 
-// ── 4. Activity logging ───────────────────────────────────────────────────────
+// ── 4. Activity logging ────────────────────────────────────────────────────────
 
 /**
  * POST /api/mobile/activity
- * Log an activity from the APK to the dashboard activity feed.
- *
- * Body: { orgId, type, itemId?, itemName?, quantity?, action, details? }
  */
 router.post('/activity', verifyFirebaseToken, async (req, res) => {
   const { orgId, type, itemId, itemName, quantity, action, details } = req.body;
@@ -200,11 +246,11 @@ router.post('/activity', verifyFirebaseToken, async (req, res) => {
   try {
     await supabase.from('activity_logs').insert({
       org_id:      orgId,
-      type:        type || 'scan',
-      entity_type: itemId ? 'inventory' : null,
-      entity_id:   itemId   || null,
-      actor_id:    actorId,
-      details: { itemName: itemName || null, quantity: quantity ?? null, action: action || null, source: 'apk', ...(details || {}) },
+      user_id:     actorId,
+      action:      action || type,
+      entity_type: itemId ? 'inventory_item' : null,
+      entity_id:   itemId || null,
+      details:     { itemName: itemName || null, quantity: quantity ?? null, source: 'apk', ...(details || {}) },
     });
     res.json({ success: true });
   } catch (err) {
@@ -213,11 +259,10 @@ router.post('/activity', verifyFirebaseToken, async (req, res) => {
   }
 });
 
-// ── 5. Stock take ─────────────────────────────────────────────────────────────
+// ── 5. Stock take ──────────────────────────────────────────────────────────────
 
 /**
  * GET /api/mobile/stock-take/sessions?orgId=UUID
- * Active (status = 'open') sessions — APK shows these on the stock-take screen.
  */
 router.get('/stock-take/sessions', verifyFirebaseToken, async (req, res) => {
   const orgId = req.query.orgId || req.user.orgId;
@@ -230,7 +275,7 @@ router.get('/stock-take/sessions', verifyFirebaseToken, async (req, res) => {
       .from('stock_take_sessions')
       .select('id, name, status, started_at, started_by')
       .eq('org_id', orgId)
-      .eq('status', 'open')
+      .in('status', ['open', 'counting'])
       .order('started_at', { ascending: false });
 
     if (error) throw error;
@@ -243,49 +288,67 @@ router.get('/stock-take/sessions', verifyFirebaseToken, async (req, res) => {
 
 /**
  * POST /api/mobile/stock-take/scan
- * Record one stock-take scan entry from the APK.
- * Uses upsert on (session_id, item_id) so re-scanning overwrites the previous count.
  *
- * Body: { orgId, sessionId, itemId, sku, itemName, countedQuantity, expectedQuantity }
+ * v3 schema column names:
+ *   counted_qty   (was counted_quantity)
+ *   expected_qty  (was expected_quantity)
+ *   counted_by    (was scanned_by)
+ *   counted_at    (was scanned_at)
+ *   NO sku column on stock_take_entries
+ *
+ * Body: { orgId, sessionId, itemId, sku, itemName, countedQuantity, expectedQuantity, idempotencyKey? }
  */
 router.post('/stock-take/scan', verifyFirebaseToken, async (req, res) => {
-  const { orgId, sessionId, itemId, sku, itemName, countedQuantity, expectedQuantity } = req.body;
-  const scannedBy = req.user.uid;
+  const {
+    orgId, sessionId, itemId,
+    countedQuantity, expectedQuantity,
+    idempotencyKey,
+  } = req.body;
+
+  const countedBy = req.user.uid;
 
   if (!orgId || !sessionId || countedQuantity == null)
-    return res.status(400).json({ success: false, message: 'Missing required: orgId, sessionId, countedQuantity' });
+    return res.status(400).json({ success: false, message: 'Missing: orgId, sessionId, countedQuantity' });
   if (req.user.orgId && req.user.orgId !== orgId)
     return res.status(403).json({ success: false, message: 'Access denied' });
 
   try {
-    const { error } = await supabase.from('stock_take_entries').upsert(
-      {
-        session_id:        sessionId,
-        org_id:            orgId,
-        item_id:           itemId || null,
-        sku:               sku    || null,
-        counted_quantity:  Number(countedQuantity),
-        expected_quantity: expectedQuantity != null ? Number(expectedQuantity) : null,
-        scanned_by:        scannedBy,
-        scanned_at:        new Date().toISOString(),
-      },
-      { onConflict: 'session_id,item_id' },
-    );
+    // Upsert with v3 column names (variance is a GENERATED column — do NOT include it)
+    const { error } = await supabase
+      .from('stock_take_entries')
+      .upsert(
+        {
+          session_id:      sessionId,
+          org_id:          orgId,
+          item_id:         itemId   || null,
+          counted_qty:     Number(countedQuantity),
+          expected_qty:    expectedQuantity != null ? Number(expectedQuantity) : 0,
+          counted_by:      countedBy,
+          counted_at:      new Date().toISOString(),
+          idempotency_key: idempotencyKey || null,
+        },
+        {
+          // location_id is NULL for APK scans — NULLS NOT DISTINCT handles the conflict
+          onConflict: 'session_id,item_id',
+          ignoreDuplicates: false,
+        }
+      );
+
     if (error) throw error;
 
     // Activity log
     await supabase.from('activity_logs').insert({
       org_id:      orgId,
-      type:        'scan',
-      entity_type: 'inventory',
+      user_id:     countedBy,
+      action:      'stock_take_scan',
+      entity_type: 'inventory_item',
       entity_id:   itemId || null,
-      actor_id:    scannedBy,
       details: {
-        sessionId, sku, itemName,
-        countedQuantity: Number(countedQuantity),
-        expectedQuantity: expectedQuantity != null ? Number(expectedQuantity) : null,
-        variance: Number(countedQuantity) - (expectedQuantity != null ? Number(expectedQuantity) : 0),
-        source: 'apk',
+        sessionId,
+        countedQty:   Number(countedQuantity),
+        expectedQty:  expectedQuantity != null ? Number(expectedQuantity) : 0,
+        variance:     Number(countedQuantity) - (expectedQuantity != null ? Number(expectedQuantity) : 0),
+        source:       'apk',
       },
     });
 
@@ -296,12 +359,10 @@ router.post('/stock-take/scan', verifyFirebaseToken, async (req, res) => {
   }
 });
 
-// ── 6. FCM token management ───────────────────────────────────────────────────
+// ── 6. FCM token management ────────────────────────────────────────────────────
 
 /**
  * DELETE /api/mobile/fcm-token
- * Remove FCM token on logout so push notifications stop going to this device.
- * Body: { token }
  */
 router.delete('/fcm-token', verifyFirebaseToken, async (req, res) => {
   const { token } = req.body;
@@ -309,6 +370,13 @@ router.delete('/fcm-token', verifyFirebaseToken, async (req, res) => {
 
   try {
     await supabase.from('fcm_tokens').delete().eq('token', token);
+
+    // Mark device_session offline
+    await supabase
+      .from('device_sessions')
+      .update({ is_online: false })
+      .eq('user_id', req.user.uid);
+
     res.json({ success: true });
   } catch (err) {
     console.error('[mobile/fcm-token DELETE]', err.message);
