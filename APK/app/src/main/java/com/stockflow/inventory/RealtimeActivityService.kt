@@ -138,7 +138,6 @@ class RealtimeActivityService private constructor(private val context: Context) 
     // ── Helpers ────────────────────────────────────────────────────────────────
 
     fun isActive(): Boolean = isListening
-    fun getDeviceId(): String = deviceId
 
     fun cleanup() {
         stopActivityListener()
