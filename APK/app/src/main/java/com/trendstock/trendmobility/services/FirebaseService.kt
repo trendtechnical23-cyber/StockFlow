@@ -15,7 +15,7 @@ import kotlinx.coroutines.launch
 /**
  * FirebaseService — class name preserved so existing screen callers compile unchanged.
  *
- * All data operations now go through the Railway backend (/api/mobile/*)
+ * All data operations now go through the Railway backend (/api/mobile/...)
  * which writes to Supabase. Firebase Firestore and Realtime Database
  * are no longer used. Firebase Cloud Messaging is NOT touched here —
  * it lives in FCMTokenManager and StockFlowMessagingService.
