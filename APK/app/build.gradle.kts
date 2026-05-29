@@ -25,8 +25,8 @@ android {
         // Fill in your Supabase project URL and anon key.
         // Find them at: Supabase Dashboard → Project Settings → API
         // DO NOT use the service_role key here — anon key only.
-        buildConfigField("String", "SUPABASE_URL",      "\"https://your-project.supabase.co\"")
-        buildConfigField("String", "SUPABASE_ANON_KEY", "\"your-supabase-anon-key\"")
+        buildConfigField("String", "SUPABASE_URL",      "\"https://bfocuklqupxpelzvfjzk.supabase.co\"")
+        buildConfigField("String", "SUPABASE_ANON_KEY", "\"sb_publishable_W8ASXvv6EhmSaOQ7hJmQwQ_OYn6f-vE\"")
 
         // ── Backend URL ───────────────────────────────────────────────────────
         buildConfigField("String", "BACKEND_URL", "\"https://stockflow-production-3876.up.railway.app/api/\"")
