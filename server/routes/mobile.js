@@ -49,10 +49,24 @@ router.get('/user-org', verifyFirebaseToken, async (req, res) => {
   }
 
   if (!orgId) {
+    // Last resort: if there is exactly one organisation in the system, use it.
+    // This handles the case where public.users.org_id was never set for the owner.
+    const { data: orgs } = await supabase
+      .from('organizations')
+      .select('id')
+      .limit(2);
+
+    if (orgs && orgs.length === 1) {
+      orgId = orgs[0].id;
+      console.warn(`[user-org] ⚠️  Resolved org ${orgId} via single-org fallback for ${email}. Update public.users.org_id to fix permanently.`);
+    }
+  }
+
+  if (!orgId) {
     console.error(`[user-org] ❌ Could not resolve org for uid=${uid} email=${email}`);
     return res.status(404).json({
       success: false,
-      message: 'No organisation linked to this account. Ask your administrator to check your user record in Supabase.',
+      message: 'No organisation linked to this account. In Supabase, set org_id in the public.users row for this email.',
     });
   }
 

@@ -119,6 +119,30 @@ object AuthManager {
         Log.d(TAG, "✅ Org ID saved: $orgId")
     }
 
+    /**
+     * Decode the Supabase JWT payload and extract org_id from user_metadata
+     * or app_metadata. Returns null if the claim is absent.
+     * Used as a client-side fallback when the backend can't resolve org_id.
+     */
+    fun extractOrgIdFromJwt(): String? {
+        return try {
+            val token = getAccessTokenRaw() ?: return null
+            val parts  = token.split(".")
+            if (parts.size < 2) return null
+            // JWT payload is base64url (no padding) encoded JSON
+            val padded  = parts[1].replace('-', '+').replace('_', '/')
+            val padded2 = padded + "=".repeat((4 - padded.length % 4) % 4)
+            val decoded = android.util.Base64.decode(padded2, android.util.Base64.DEFAULT)
+            val json    = JSONObject(String(decoded, Charsets.UTF_8))
+            // Supabase stores org_id in user_metadata or app_metadata
+            json.optJSONObject("user_metadata")?.optString("org_id")?.takeIf { it.isNotBlank() }
+                ?: json.optJSONObject("app_metadata")?.optString("org_id")?.takeIf { it.isNotBlank() }
+        } catch (e: Exception) {
+            Log.w(TAG, "JWT org_id extraction failed: ${e.message}")
+            null
+        }
+    }
+
     fun clearSession() {
         prefs?.edit()?.clear()?.apply()
         Log.d(TAG, "🔓 Session cleared (signed out)")

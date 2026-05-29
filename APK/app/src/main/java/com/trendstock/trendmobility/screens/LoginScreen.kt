@@ -152,12 +152,26 @@ fun LoginScreen(
                         }
 
                         val orgResponse = orgResult.getOrNull()
-                        val orgId = orgResponse?.body()?.data?.orgId
+                        var orgId = orgResponse?.body()?.data?.orgId
+
                         if (orgId.isNullOrBlank()) {
                             val serverMsg = orgResponse?.body()?.message
                                 ?: orgResult.exceptionOrNull()?.message
-                                ?: "No organisation found for this account."
-                            android.util.Log.e("LoginScreen", "user-org failed: HTTP ${orgResponse?.code()} — $serverMsg")
+                                ?: "Backend did not return org"
+                            android.util.Log.w("LoginScreen", "user-org backend failed (HTTP ${orgResponse?.code()}): $serverMsg — trying JWT fallback")
+
+                            // Fallback: decode org_id directly from the Supabase JWT payload
+                            orgId = AuthManager.extractOrgIdFromJwt()
+                            if (!orgId.isNullOrBlank()) {
+                                android.util.Log.d("LoginScreen", "✅ Org resolved from JWT: $orgId")
+                            }
+                        }
+
+                        if (orgId.isNullOrBlank()) {
+                            val serverMsg = orgResponse?.body()?.message
+                                ?: orgResult.exceptionOrNull()?.message
+                                ?: "No organisation found. Check your user record in Supabase (public.users must have org_id set)."
+                            android.util.Log.e("LoginScreen", "❌ All org lookups failed: $serverMsg")
                             AuthManager.clearSession()
                             withContext(Dispatchers.Main) {
                                 errorMessage = serverMsg
