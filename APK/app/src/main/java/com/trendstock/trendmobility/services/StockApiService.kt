@@ -13,13 +13,18 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 /**
- * FirebaseService — class name preserved so existing screen callers compile unchanged.
+ * StockApiService — backend API wrapper for all inventory operations.
  *
- * All data operations now go through the Railway backend (/api/mobile/...)
- * which writes to Supabase. Firebase Firestore and Realtime Database
- * are no longer used. Firebase Cloud Messaging is NOT touched here —
- * it lives in FCMTokenManager and StockFlowMessagingService.
+ * Previously named FirebaseService (legacy name preserved for callers).
+ * Contains zero Firebase code. All operations route through the Railway backend
+ * (/api/mobile/...) which validates and writes to Supabase.
+ *
+ * FCM push notifications are handled separately in:
+ *   - FCMTokenManager (token registration)
+ *   - StockFlowMessagingService (incoming push handling)
  */
+// Class name kept as FirebaseService so all existing screen callers compile without changes.
+// TODO: rename import sites to StockApiService when convenient.
 class FirebaseService(private val context: Context) {
 
     companion object {

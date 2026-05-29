@@ -228,15 +228,15 @@ export class OrganizationDataService {
     console.log('🧹 Local data cleared');
   }
 
-  /** Create organization + owner user via RPC */
+  /** Create organization + owner user via RPC (v3 schema: rpc_create_org_with_owner) */
   async createOrganization(organizationData: any, adminUserData: any) {
-    const { data, error } = await supabase.rpc('create_organization_with_owner', {
-      p_org_id:       organizationData.id,
-      p_org_name:     organizationData.name,
-      p_org_plan:     organizationData.plan ?? 'free',
-      p_user_id:      adminUserData.uid,
-      p_user_email:   adminUserData.email,
-      p_user_name:    adminUserData.displayName ?? adminUserData.email,
+    const { data, error } = await supabase.rpc('rpc_create_org_with_owner', {
+      p_org_id:     organizationData.id,
+      p_org_name:   organizationData.name,
+      p_org_plan:   organizationData.plan ?? 'free',
+      p_user_id:    adminUserData.uid,
+      p_user_email: adminUserData.email,
+      p_user_name:  adminUserData.displayName ?? adminUserData.email,
     });
 
     if (error) {
@@ -249,60 +249,81 @@ export class OrganizationDataService {
 
   /** Fetch org + user row — used on login to hydrate AppContext */
   async getOrganizationData(organizationId: string, userId: string) {
-    const [orgResult, userResult] = await Promise.all([
-      supabase.from('organizations').select('*').eq('id', organizationId).single(),
-      supabase.from('users').select('*').eq('id', userId).single(),
+    const [orgResult, userResult, settingsResult] = await Promise.all([
+      supabase.from('organizations').select('id, name, subscription_plan, status, integrations, created_at, updated_at').eq('id', organizationId).single(),
+      // v3 schema: role column renamed to legacy_role
+      supabase.from('users').select('id, org_id, email, full_name, legacy_role, status, created_at').eq('id', userId).single(),
+      supabase.from('organization_settings').select('*').eq('org_id', organizationId).maybeSingle(),
     ]);
 
     if (orgResult.error)  throw orgResult.error;
     if (userResult.error) throw userResult.error;
 
-    return { organization: orgResult.data, user: userResult.data };
+    // Normalise user row: expose legacy_role as 'role' so existing AppContext code works
+    const user = userResult.data ? { ...userResult.data, role: userResult.data.legacy_role } : null;
+    const org  = orgResult.data  ? { ...orgResult.data,  plan: orgResult.data.subscription_plan, settings: settingsResult.data ?? {} } : null;
+
+    return { organization: org, user };
   }
 
   /** Bulk load of org data on startup */
   async getAllOrganizationData(organizationId: string) {
-    // Fetch ALL inventory pages — PostgREST caps at 1000 rows by default,
-    // so we paginate with range() until we get a partial page.
-    const PAGE = 1000;
-    let allInventory: any[] = [];
-    let from = 0;
-    while (true) {
-      const { data, error } = await supabase
-        .from('inventory_items')
-        .select('*')
-        .eq('org_id', organizationId)   // ← scope to this org only
-        .eq('is_active', true)
-        .order('name')
-        .range(from, from + PAGE - 1);
+    // v3 schema: inventory_items has NO quantity column.
+    // Stock levels come from rpc_get_org_stock_summary (joins inventory_balances).
+    // We fetch both in parallel and merge.
 
-      if (error) { console.error('❌ inventory_items page error:', error.message); break; }
-      if (!data || data.length === 0) break;
-      allInventory = allInventory.concat(data);
-      if (data.length < PAGE) break;   // last page
-      from += PAGE;
-    }
-
-    const [usersResult, logsResult] = await Promise.all([
+    const [stockSummaryResult, usersResult, logsResult] = await Promise.all([
+      // Returns items with current_stock from inventory_balances
+      supabase.rpc('rpc_get_org_stock_summary', { p_org_id: organizationId }),
+      // v3: filter by status = 'active' (not is_active boolean — that column is on items, not users)
       supabase
         .from('users')
-        .select('*')
+        .select('id, org_id, email, full_name, legacy_role, status, created_at')
         .eq('org_id', organizationId)
-        .eq('is_active', true),
+        .eq('status', 'active'),
       supabase
         .from('activity_logs')
-        .select('*')
+        .select('id, org_id, user_id, action, entity_type, entity_id, details, created_at')
         .eq('org_id', organizationId)
         .order('created_at', { ascending: false })
         .limit(100),
     ]);
 
-    console.log(`✅ Loaded ${allInventory.length} inventory items for org ${organizationId}`);
+    // Map rpc_get_org_stock_summary rows to the shape AppContext expects
+    const inventory = (stockSummaryResult.data ?? []).map((row: any) => ({
+      id:            row.item_id,
+      org_id:        organizationId,
+      sku:           row.sku,
+      name:          row.name,
+      // Expose stock as both 'stock' (legacy) and 'quantity' (v1 compat)
+      stock:         Number(row.current_stock ?? 0),
+      quantity:      Number(row.current_stock ?? 0),
+      threshold:     row.minimum_stock ?? 0,
+      min_quantity:  row.minimum_stock ?? 0,
+      reorder_point: row.reorder_point ?? null,
+      unit_price:    row.unit_price    ?? null,
+      unit_cost:     row.unit_cost     ?? null,
+      is_active:     true,
+      is_priority:   row.is_priority   ?? false,
+      is_low_stock:  row.is_low_stock  ?? false,
+      is_out_of_stock: row.is_out_of_stock ?? false,
+      category_id:   row.category_id   ?? null,
+      // Fields from the inventory_items table will be null here — fetch full details
+      // via ItemDetailView which queries inventory_items directly.
+    }));
+
+    // Normalise users: expose legacy_role as 'role' for AppContext compat
+    const users = (usersResult.data ?? []).map((u: any) => ({
+      ...u,
+      role: u.legacy_role,
+    }));
+
+    console.log(`✅ Loaded ${inventory.length} items for org ${organizationId}`);
 
     return {
-      inventory:    allInventory,
-      users:        usersResult.data  ?? [],
-      activityLogs: logsResult.data   ?? [],
+      inventory,
+      users,
+      activityLogs: logsResult.data ?? [],
     };
   }
 }
