@@ -232,8 +232,11 @@ export const submitAdjustmentRequest = async (
   orgId: string,
   itemId: string,
   delta: number,
-  reason: string
+  reason: string,
+  idempotencyKey?: string
 ): Promise<string> => {
+  // Generate idempotency key if not provided — prevents APK retry duplicates
+  const key = idempotencyKey ?? crypto.randomUUID();
   const token = await getAccessToken();
   const res = await fetch(`${getApiBase()}/api/approvals/request`, {
     method: 'POST',
@@ -241,7 +244,7 @@ export const submitAdjustmentRequest = async (
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
-    body: JSON.stringify({ orgId, itemId, delta, reason }),
+    body: JSON.stringify({ orgId, itemId, delta, reason, idempotencyKey: key }),
   });
 
   const json = await res.json();

@@ -206,28 +206,94 @@ async function sendToOrg(orgId, payload) {
 }
 
 /**
- * Register or update a device FCM token.
- * Called from the APK when a new token is generated.
+ * Register or update a device FCM token + device_session row.
+ * Called from the APK when a new token is generated or app opens.
  *
  * @param {object} opts
  */
-async function registerToken({ orgId, userId, deviceId, platform = 'android', token }) {
-  const { error } = await supabase
+async function registerToken({ orgId, userId, deviceId, platform = 'android', token, appVersion = null, ipAddress = null }) {
+  // Upsert FCM token
+  const { error: tokenError } = await supabase
     .from('fcm_tokens')
     .upsert(
       {
         org_id:         orgId,
         user_id:        userId,
         device_id:      deviceId,
-        platform:       platform,
-        token:          token,
+        platform,
+        token,
         last_active_at: new Date().toISOString(),
       },
       { onConflict: 'user_id,device_id' }
     );
 
-  if (error) throw new Error(`Token registration failed: ${error.message}`);
-  console.log(`✅ FCM token registered for user ${userId} device ${deviceId}`);
+  if (tokenError) throw new Error(`Token registration failed: ${tokenError.message}`);
+
+  // Upsert device_session
+  const { error: sessionError } = await supabase
+    .from('device_sessions')
+    .upsert(
+      {
+        user_id:        userId,
+        org_id:         orgId,
+        device_id:      deviceId,
+        platform,
+        app_version:    appVersion,
+        last_seen_at:   new Date().toISOString(),
+        ip_address:     ipAddress,
+        is_online:      true,
+        push_enabled:   true,
+      },
+      { onConflict: 'user_id,device_id' }
+    );
+
+  if (sessionError) console.warn('⚠️ Device session upsert failed:', sessionError.message);
+
+  console.log(`✅ FCM token + device session registered for user ${userId} device ${deviceId}`);
 }
 
-module.exports = { sendToUsers, sendToOrg, registerToken };
+/**
+ * Look up users who have push_enabled = true in their device_session.
+ * Filters out users who have disabled push before sending.
+ */
+async function getPushEnabledTokens(userIds) {
+  if (!userIds?.length) return [];
+
+  const { data, error } = await supabase
+    .from('fcm_tokens')
+    .select('user_id, token, device_id, users!inner(org_id)')
+    .in('user_id', userIds);
+
+  if (error) {
+    console.error('❌ FCM token lookup failed:', error.message);
+    return [];
+  }
+
+  // Filter by push_enabled from device_sessions
+  const { data: sessions } = await supabase
+    .from('device_sessions')
+    .select('user_id, device_id, push_enabled')
+    .in('user_id', userIds)
+    .eq('push_enabled', true);
+
+  const pushEnabledSet = new Set(
+    (sessions ?? []).map(s => `${s.user_id}:${s.device_id}`)
+  );
+
+  return (data ?? []).filter(t =>
+    pushEnabledSet.has(`${t.user_id}:${t.device_id}`)
+  );
+}
+
+/**
+ * Mark a notification_recipient row as push_sent after successful FCM delivery.
+ */
+async function markPushSent(eventId, userId) {
+  await supabase
+    .from('notification_recipients')
+    .update({ push_sent: true })
+    .eq('event_id', eventId)
+    .eq('user_id', userId);
+}
+
+module.exports = { sendToUsers, sendToOrg, registerToken, markPushSent };

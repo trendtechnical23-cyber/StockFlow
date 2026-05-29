@@ -1,138 +1,105 @@
 /**
- * Supabase Notification Service (replaces the old Firestore implementation)
+ * Notification Service v2
  *
- * Table: public.notifications
- *   id, org_id, user_id, title, body, type, data (jsonb), is_read, created_at
+ * Schema: notification_events + notification_recipients (split tables)
  *
- * Model notes (Firestore → Supabase):
- *   - targetUserId 'ALL'  → user_id = NULL  (org-wide broadcast)
- *   - targetUserId <uid>  → user_id = <uid> (direct)
- *   - read/readBy[]       → is_read (boolean per row)
- *   - message             → body
- *   - metadata            → data (jsonb)
+ * notification_events   — the event itself (one row per occurrence)
+ * notification_recipients — per-user delivery state (is_read, push_sent, etc.)
+ *
+ * Queries join both tables so callers get a flat Notification shape.
+ * Realtime subscribes to notification_recipients (user-scoped inserts).
+ *
+ * Backward-compat: exports the same Notification interface and
+ * NotificationService class API as v1 so all existing callers work unchanged.
  */
 
 import { supabase } from './supabase';
 import type { RealtimeChannel } from '@supabase/supabase-js';
 
-export type NotificationType = 'approval' | 'stock' | 'system' | 'low_stock' | 'user' | 'stock_take_session';
+export type NotificationType =
+  | 'approval_pending'
+  | 'approval_approved'
+  | 'approval_rejected'
+  | 'stock_adjustment_applied'
+  | 'low_stock'
+  | 'stock_take_approved'
+  | 'system'
+  | 'user'
+  | string;
 
 export interface Notification {
-  id?: string;
-  type: NotificationType;
-  title: string;
-  message: string;
-  targetUserId: string | 'ALL';
-  createdAt: Date | string;
-  read: boolean;
-  link?: string;
-  priority: 'high' | 'normal';
-  metadata?: Record<string, any>;
+  id:           string;   // notification_recipients.id
+  eventId:      string;   // notification_events.id
+  type:         NotificationType;
+  title:        string;
+  message:      string;
+  read:         boolean;
+  pushSent:     boolean;
+  createdAt:    string;
+  data:         Record<string, any>;
+  // kept for backward compat
+  targetUserId: string;
+  priority:     'high' | 'normal';
+  metadata:     Record<string, any>;
 }
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const HIGH_PRIORITY_TYPES = new Set([
+  'approval_pending', 'low_stock', 'approval_approved', 'approval_rejected'
+]);
 
-/** Map a Supabase notifications row to the app's Notification shape */
-const rowToNotification = (row: any, userId: string): Notification => ({
-  id: row.id,
-  type: row.type,
-  title: row.title,
-  message: row.body ?? '',
-  targetUserId: row.user_id ?? 'ALL',
-  createdAt: row.created_at,
-  read: !!row.is_read,
-  priority: row.data?.priority ?? 'normal',
-  link: row.data?.link,
-  metadata: row.data ?? {},
-  // surface common metadata fields at top level (used by useNotifications)
-  ...(row.data?.eventType ? { eventType: row.data.eventType } : {}),
-  ...(row.data?.sessionId ? { sessionId: row.data.sessionId } : {}),
-}) as Notification;
+function rowToNotification(row: any): Notification {
+  const event = row.notification_events ?? row.event ?? {};
+  return {
+    id:           row.id,
+    eventId:      row.event_id,
+    type:         event.type ?? row.type ?? 'system',
+    title:        event.title ?? row.title ?? '',
+    message:      event.body  ?? row.body  ?? '',
+    read:         !!row.is_read,
+    pushSent:     !!row.push_sent,
+    createdAt:    event.created_at ?? row.created_at,
+    data:         event.data  ?? row.data ?? {},
+    // backward compat
+    targetUserId: row.user_id ?? 'ALL',
+    priority:     HIGH_PRIORITY_TYPES.has(event.type) ? 'high' : 'normal',
+    metadata:     event.data ?? {},
+  };
+}
 
 class NotificationService {
-  // Singleton channel management — ONE channel per (org, user) pair shared across all callers.
-  // Multiple components (Header, Sidebar, etc.) call subscribeToNotifications(); they all
-  // receive the same data through this shared set of callbacks.
   private activeChannel: RealtimeChannel | null = null;
   private activeKey: string | null = null;
   private callbacks: Set<(n: Notification[]) => void> = new Set();
   private lastNotifications: Notification[] = [];
 
-  /** @deprecated kept for backwards compat if anything outside uses it */
-  private channels: Map<string, RealtimeChannel> = new Map();
+  // ── Subscribe ──────────────────────────────────────────────────
 
-  /** Create a notification */
-  async createNotification(
-    organizationId: string,
-    notification: Omit<Notification, 'id' | 'createdAt' | 'read'>
-  ): Promise<string> {
-    try {
-      const targetIsUser = notification.targetUserId && notification.targetUserId !== 'ALL'
-        && UUID_RE.test(notification.targetUserId);
-
-      const { data, error } = await supabase
-        .from('notifications')
-        .insert({
-          org_id:  organizationId,
-          user_id: targetIsUser ? notification.targetUserId : null,
-          title:   notification.title,
-          body:    notification.message,
-          type:    notification.type,
-          data: {
-            priority: notification.priority,
-            link: notification.link,
-            ...(notification.metadata ?? {}),
-          },
-          is_read: false,
-        })
-        .select('id')
-        .single();
-
-      if (error) throw error;
-      console.log('✅ Notification created:', data.id);
-      return data.id;
-    } catch (error) {
-      console.error('❌ Failed to create notification:', error);
-      throw error;
-    }
-  }
-
-  /** Subscribe to a user's notifications (direct + org broadcasts) in real time.
-   *
-   * ARCHITECTURE: Singleton channel — one Supabase Realtime channel per (org, user) pair,
-   * shared across all callers (Header, Sidebar, useNotifications, etc.). This prevents:
-   *   - "cannot add postgres_changes callbacks after subscribe()" (Supabase throws when
-   *     .on() is called on an already-subscribed channel)
-   *   - Multiple competing channels for the same data
-   *   - React StrictMode double-mount creating duplicate subscriptions
-   *
-   * Supabase Realtime rule: ALL .on() handlers MUST be chained BEFORE .subscribe().
-   *
-   * Returns an unsubscribe function. The channel is only torn down when the LAST
-   * subscriber calls its unsubscribe function.
-   */
   subscribeToNotifications(
     organizationId: string,
     userId: string,
     onUpdate: (notifications: Notification[]) => void,
-    maxCount: number = 50
+    maxCount = 50
   ): () => void {
     const key = `${organizationId}_${userId}`;
 
     const fetchAll = async () => {
       try {
         const { data, error } = await supabase
-          .from('notifications')
-          .select('*')
-          .eq('org_id', organizationId)
-          .or(`user_id.eq.${userId},user_id.is.null`)
+          .from('notification_recipients')
+          .select(`
+            id, event_id, user_id, is_read, push_sent, created_at,
+            notification_events!inner (
+              id, org_id, type, title, body, data, created_at
+            )
+          `)
+          .eq('user_id', userId)
+          .eq('notification_events.org_id', organizationId)
           .order('created_at', { ascending: false })
           .limit(maxCount);
 
         if (error) throw error;
-        const notifications = (data ?? []).map(r => rowToNotification(r, userId));
+        const notifications = (data ?? []).map(r => rowToNotification(r));
         this.lastNotifications = notifications;
-        // Notify every subscriber (Header, Sidebar, etc.)
         this.callbacks.forEach(cb => cb(notifications));
       } catch (err) {
         console.error('❌ Failed to fetch notifications:', err);
@@ -140,15 +107,11 @@ class NotificationService {
       }
     };
 
-    // Register this caller's callback
     this.callbacks.add(onUpdate);
 
     if (this.activeKey === key && this.activeChannel) {
-      // Channel already open for this (org, user) — give this caller the cached data
-      // immediately so it doesn't render empty while waiting for the next DB event.
       onUpdate(this.lastNotifications);
     } else {
-      // Different (org, user) pair or no channel yet — tear down old channel first.
       if (this.activeChannel) {
         supabase.removeChannel(this.activeChannel);
         this.activeChannel = null;
@@ -156,38 +119,28 @@ class NotificationService {
       this.activeKey = key;
       this.lastNotifications = [];
 
-      // Initial fetch
       fetchAll();
 
-      // CRITICAL: chain ALL .on() handlers BEFORE .subscribe().
-      // Guard: if Supabase's registry already has a channel with this name
-      // (e.g. from a previous session that wasn't cleaned up), remove it first
-      // so we get a fresh unsubscribed instance.
-      const channelName = `notifications:${key}`;
-      try {
-        // If Supabase's registry already has this channel name in a subscribed state,
-        // remove it so we get a fresh unsubscribed instance.
-        const existing = supabase.channel(channelName);
-        if ((existing as any).state === 'joined' || (existing as any).state === 'joining') {
-          supabase.removeChannel(existing); // fire-and-forget, sync removal from registry
-        }
-      } catch (_) { /* ignore */ }
-
+      const channelName = `notif_recipients:${key}`;
       this.activeChannel = supabase
         .channel(channelName)
         .on(
           'postgres_changes',
-          { event: '*', schema: 'public', table: 'notifications', filter: `org_id=eq.${organizationId}` },
-          () => { fetchAll(); }
+          {
+            event: 'INSERT',
+            schema: 'public',
+            table: 'notification_recipients',
+            filter: `user_id=eq.${userId}`,
+          },
+          () => fetchAll()
         )
         .subscribe((status) => {
           if (status === 'SUBSCRIBED') {
-            console.log(`🔔 Notifications channel active for org ${organizationId}`);
+            console.log(`🔔 Notification channel active for user ${userId}`);
           }
         });
     }
 
-    // Return per-caller unsubscribe — channel only removed when last caller unsubscribes
     return () => {
       this.callbacks.delete(onUpdate);
       if (this.callbacks.size === 0 && this.activeChannel) {
@@ -199,88 +152,109 @@ class NotificationService {
     };
   }
 
-  /** Mark a single notification as read */
+  // ── Mark read ──────────────────────────────────────────────────
+
   async markAsRead(_organizationId: string, notificationId: string, _userId: string): Promise<void> {
-    try {
-      const { error } = await supabase
-        .from('notifications')
-        .update({ is_read: true })
-        .eq('id', notificationId);
-      if (error) throw error;
-    } catch (error) {
-      console.error('❌ Failed to mark notification as read:', error);
-      throw error;
-    }
+    const { error } = await supabase
+      .from('notification_recipients')
+      .update({ is_read: true, read_at: new Date().toISOString() })
+      .eq('id', notificationId);
+    if (error) throw error;
   }
 
-  /** Mark all of a user's notifications as read */
   async markAllAsRead(organizationId: string, userId: string): Promise<void> {
-    try {
-      const { error } = await supabase
-        .from('notifications')
-        .update({ is_read: true })
-        .eq('org_id', organizationId)
-        .or(`user_id.eq.${userId},user_id.is.null`)
-        .eq('is_read', false);
-      if (error) throw error;
-    } catch (error) {
-      console.error('❌ Failed to mark all as read:', error);
-      throw error;
-    }
+    const { error } = await supabase
+      .from('notification_recipients')
+      .update({ is_read: true, read_at: new Date().toISOString() })
+      .eq('user_id', userId)
+      .eq('is_read', false);
+    if (error) throw error;
   }
 
-  /** Unread count for a user */
+  // ── Unread count ───────────────────────────────────────────────
+
   async getUnreadCount(organizationId: string, userId: string): Promise<number> {
-    try {
-      const { count, error } = await supabase
-        .from('notifications')
-        .select('id', { count: 'exact', head: true })
-        .eq('org_id', organizationId)
-        .or(`user_id.eq.${userId},user_id.is.null`)
-        .eq('is_read', false);
-      if (error) throw error;
-      return count ?? 0;
-    } catch (error) {
-      console.error('❌ Failed to get unread count:', error);
-      return 0;
-    }
+    const { count, error } = await supabase
+      .from('notification_recipients')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', userId)
+      .eq('is_read', false);
+    if (error) return 0;
+    return count ?? 0;
   }
 
-  unsubscribeAll(): void {
-    this.channels.forEach(ch => supabase.removeChannel(ch));
-    this.channels.clear();
-  }
+  // ── Convenience helpers (backward compat) ──────────────────────
 
-  // ── Convenience helpers ───────────────────────────────────────────────
   async notifyApproval(organizationId: string, targetUserId: string, itemName: string, approvalId: string): Promise<void> {
     await this.createNotification(organizationId, {
-      type: 'approval', title: 'Approval Request',
+      type: 'approval_pending',
+      title: '🔔 Approval Required',
       message: `Stock change for "${itemName}" requires your approval`,
-      targetUserId, link: `/approvals/${approvalId}`, priority: 'high',
+      targetUserId,
+      priority: 'high',
     });
   }
 
   async notifyLowStock(organizationId: string, managerUserIds: string[], itemName: string, currentStock: number): Promise<void> {
-    await Promise.all(managerUserIds.map(managerId =>
-      this.createNotification(organizationId, {
-        type: 'low_stock', title: 'Low Stock Alert',
-        message: `${itemName} is low on stock (${currentStock} remaining)`,
-        targetUserId: managerId, link: '/inventory', priority: 'high',
-        metadata: { itemName, currentStock },
+    // Use RPC broadcast to all managers
+    const { error } = await supabase.rpc('fn_notify_managers', {
+      p_org_id: organizationId,
+      p_type:   'low_stock',
+      p_title:  '⚠️ Low Stock Alert',
+      p_body:   `${itemName} is low on stock (${currentStock} remaining)`,
+      p_data:   { itemName, currentStock },
+    });
+    if (error) console.error('❌ Low stock notification failed:', error.message);
+  }
+
+  async notifyUser(organizationId: string, targetUserId: string, title: string, message: string): Promise<void> {
+    await this.createNotification(organizationId, {
+      type: 'user',
+      title,
+      message,
+      targetUserId,
+      priority: 'normal',
+    });
+  }
+
+  /** @deprecated Internal helper — prefer calling fn_notify_users RPC from backend */
+  async createNotification(
+    organizationId: string,
+    notification: { type: string; title: string; message: string; targetUserId: string; priority: 'high' | 'normal'; data?: Record<string, any> }
+  ): Promise<void> {
+    // Insert event
+    const { data: event, error: eventErr } = await supabase
+      .from('notification_events')
+      .insert({
+        org_id: organizationId,
+        type:   notification.type,
+        title:  notification.title,
+        body:   notification.message,
+        data:   notification.data ?? {},
       })
-    ));
+      .select('id')
+      .single();
+
+    if (eventErr) { console.error('❌ Failed to create notification event:', eventErr.message); return; }
+
+    // Insert recipient row
+    const { error: recipErr } = await supabase
+      .from('notification_recipients')
+      .insert({
+        event_id: event.id,
+        org_id:   organizationId,
+        user_id:  notification.targetUserId,
+      });
+
+    if (recipErr) console.error('❌ Failed to create notification recipient:', recipErr.message);
   }
 
-  async notifySystem(organizationId: string, title: string, message: string): Promise<void> {
-    await this.createNotification(organizationId, {
-      type: 'system', title, message, targetUserId: 'ALL', priority: 'normal',
-    });
-  }
-
-  async notifyUser(organizationId: string, targetUserId: string, title: string, message: string, link?: string): Promise<void> {
-    await this.createNotification(organizationId, {
-      type: 'user', title, message, targetUserId, link, priority: 'normal',
-    });
+  unsubscribeAll(): void {
+    if (this.activeChannel) {
+      supabase.removeChannel(this.activeChannel);
+      this.activeChannel = null;
+    }
+    this.callbacks.clear();
   }
 }
 

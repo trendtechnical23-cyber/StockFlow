@@ -94,16 +94,14 @@ class ApprovalService {
       .in('legacy_role', ['owner', 'manager']);
 
     if (managers?.length) {
-      const notifRows = managers.map(m => ({
-        org_id:  orgId,
-        user_id: m.id,
-        type:    'approval_pending',
-        title:   '🔔 Approval Required',
-        body:    `${requesterName} requested a ${sign}${delta} unit adjustment for ${itemName}`,
-        data:    { approvalId, itemId, itemName, delta, requesterName, requestedBy },
-      }));
-
-      const { error: notifError } = await supabase.from('notifications').insert(notifRows);
+      // Insert event + per-manager recipient rows via helper function
+    const { error: notifError } = await supabase.rpc('fn_notify_managers', {
+        p_org_id: orgId,
+        p_type:   'approval_pending',
+        p_title:  '🔔 Approval Required',
+        p_body:   `${requesterName} requested a ${sign}${delta} unit adjustment for ${itemName}`,
+        p_data:   { approvalId, itemId, itemName, delta, requesterName, requestedBy },
+      });
       if (notifError) console.error('⚠️ Failed to insert manager notifications:', notifError.message);
 
       // 4. Fire FCM push to each manager
