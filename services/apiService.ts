@@ -2278,14 +2278,42 @@ export const getApprovals = async (organizationId: string): Promise<ApprovalRequ
   try {
     const { data, error } = await supabase
       .from('approval_requests')
-      .select('*')
+      .select(`
+        *,
+        inventory_items ( id, name, sku, unit_price ),
+        requester:users!approval_requests_requested_by_fkey ( id, full_name, email ),
+        approver:users!approval_requests_approved_by_fkey  ( id, full_name, email )
+      `)
       .eq('org_id', organizationId)
       .order('created_at', { ascending: false });
+
     if (error) throw error;
-    return (data ?? []) as unknown as ApprovalRequest[];
+
+    // Map Supabase row shape → ApprovalRequest shape the dashboard expects
+    return (data ?? []).map((row: any): ApprovalRequest => ({
+      id:              row.id,
+      type:            'zoho_sync' as const,
+      action:          'adjust_stock' as const,
+      itemId:          row.item_id   ?? undefined,
+      itemName:        row.inventory_items?.name  ?? undefined,
+      itemSKU:         row.inventory_items?.sku   ?? undefined,
+      requestedBy:     row.requested_by ?? '',
+      requestedByName: row.requester?.full_name ?? row.requester?.email ?? undefined,
+      requestedAt:     row.created_at,
+      requestedChange: {
+        quantityDelta: row.delta    ?? undefined,
+        reason:        row.reason   ?? undefined,
+        unitCost:      row.inventory_items?.unit_price ?? undefined,
+      },
+      status:          row.status as 'pending' | 'approved' | 'rejected',
+      approvedBy:      row.approved_by ?? undefined,
+      approvedByName:  row.approver?.full_name ?? row.approver?.email ?? undefined,
+      processed:       row.status === 'approved' || row.status === 'rejected',
+      source:          'apk',
+    }));
   } catch (error) {
     console.error('Error fetching approvals:', error);
-    return []; // Non-critical — return empty so callers (e.g. pending count) don't break
+    return [];
   }
 };
 
@@ -2306,49 +2334,42 @@ export const createApprovalRequest = async (
   approvalData: Omit<ApprovalRequest, 'id' | 'requestedAt' | 'status' | 'processed'>
 ): Promise<string> => {
   try {
-    // ── Idempotency hash ───────────────────────────────────────────────────
-    // Prevents duplicate Zoho transactions if the same approval is accidentally
-    // submitted twice (unstable network, double-tap, retry storm).
-    // Hash ingredients: session + SKU + counted qty + delta — uniquely identifies
-    // one specific count result for one item in one session.
-    const hashInput = [
-      approvalData.stockTakeSessionId ?? organizationId,
-      approvalData.itemSKU ?? approvalData.itemId ?? '',
-      String(approvalData.requestedChange?.newQuantity ?? ''),
-      String(approvalData.requestedChange?.quantityDelta ?? '')
-    ].join('|');
-    const idempotencyHash = await sha256(hashInput);
+    const { data, error } = await supabase
+      .from('approval_requests')
+      .insert({
+        org_id:       organizationId,
+        type:         'stock_adjustment',
+        item_id:      approvalData.itemId    ?? null,
+        delta:        approvalData.requestedChange?.quantityDelta ?? null,
+        reason:       approvalData.requestedChange?.reason        ?? null,
+        requested_by: approvalData.requestedBy,
+        status:       'pending',
+      })
+      .select('id')
+      .single();
 
-    const approvalsRef = collection(firestore, 'organizations', organizationId, 'approvals');
-    const docRef = await addDoc(approvalsRef, {
-      ...approvalData,
-      requestedAt: serverTimestamp(),
-      status: 'pending',
-      processed: false,
-      approvalPhase: 'operational',   // Phase 1: operational review by warehouse/admin
-      idempotencyHash                 // Phase 2 guard: Zoho routes check this before syncing
-    });
-    
-    console.log('✅ Approval request created:', docRef.id);
+    if (error) throw error;
 
-    // Audit ledger: immutable record of this approval being created
-    await writeAuditEntry(organizationId, {
-      event: 'approval_created',
-      actor: approvalData.requestedBy,
-      actorName: approvalData.requestedByName || 'Unknown',
-      approvalId: docRef.id,
-      sessionId: approvalData.stockTakeSessionId,
-      itemId: approvalData.itemId,
-      itemName: approvalData.itemName,
-      itemSKU: approvalData.itemSKU,
-      quantityDelta: approvalData.requestedChange?.quantityDelta,
-      newQuantity: approvalData.requestedChange?.newQuantity,
-      expectedQuantity: approvalData.requestedChange?.expectedQuantity,
-      unitCost: approvalData.requestedChange?.unitCost,
-      valueImpact: (approvalData.requestedChange?.quantityDelta ?? 0) * (approvalData.requestedChange?.unitCost ?? 0)
+    console.log('✅ Approval request created:', data.id);
+
+    // Activity log
+    await supabase.from('activity_logs').insert({
+      org_id:      organizationId,
+      type:        'approval_created',
+      entity_type: 'inventory',
+      entity_id:   approvalData.itemId ?? null,
+      actor_id:    approvalData.requestedBy,
+      details: {
+        approvalId:    data.id,
+        itemName:      approvalData.itemName,
+        itemSKU:       approvalData.itemSKU,
+        quantityDelta: approvalData.requestedChange?.quantityDelta,
+        reason:        approvalData.requestedChange?.reason,
+        source:        'dashboard',
+      },
     });
 
-    return docRef.id;
+    return data.id;
   } catch (error) {
     console.error('Error creating approval request:', error);
     throw new Error('Failed to create approval request');
@@ -2370,30 +2391,38 @@ export const approveZohoSync = async (
   approvalComment: string = ''
 ): Promise<void> => {
   try {
-    // Get approver name
-    const userDoc = await getDoc(doc(firestore, 'organizations', organizationId, 'users', approverUid));
-    const approverName = userDoc.exists() ? userDoc.data()?.name : 'Unknown Admin';
-    const approverEmail = userDoc.exists() ? userDoc.data()?.email : 'admin@unknown.com';
+    // ── Get approver info ─────────────────────────────────────────────────
+    const { data: approverRow } = await supabase
+      .from('users').select('full_name, email').eq('id', approverUid).maybeSingle();
+    const approverName  = approverRow?.full_name ?? approverRow?.email ?? 'Unknown Admin';
+    const approverEmail = approverRow?.email ?? 'admin@unknown.com';
 
-    // Get the approval request details
-    const approvalRef = doc(firestore, 'organizations', organizationId, 'approvals', approvalId);
-    const approvalSnap = await getDoc(approvalRef);
+    // ── Get the approval request ───────────────────────────────────────────
+    const { data: approval, error: fetchErr } = await supabase
+      .from('approval_requests')
+      .select(`*, inventory_items ( id, name, sku, unit_price )`)
+      .eq('id', approvalId)
+      .maybeSingle();
 
-    if (!approvalSnap.exists()) {
-      throw new Error('Approval request not found');
-    }
+    if (fetchErr || !approval) throw new Error('Approval request not found');
 
-    const approval = approvalSnap.data();
-    const { itemId, itemName, requestedBy, requestedByName, requestedChange, action } = approval;
+    const itemId   = approval.item_id;
+    const itemName = approval.inventory_items?.name ?? 'Unknown Item';
+    const requestedBy     = approval.requested_by;
+    const quantityDelta   = approval.delta ?? 0;
+    const requestedChange = { quantityDelta, reason: approval.reason };
 
-    // Mark as approved. processed:true is only set by the backend after Zoho confirms.
-    await updateDoc(approvalRef, {
-      status: 'approved',
-      approvedBy: approverUid,
-      approvedByName: approverName,
-      approvedAt: serverTimestamp(),
-      ...(approvalComment.trim() ? { approvalComment: approvalComment.trim() } : {})
-    });
+    // ── Mark as approved ──────────────────────────────────────────────────
+    const { error: updateErr } = await supabase
+      .from('approval_requests')
+      .update({
+        status:      'approved',
+        approved_by: approverUid,
+        updated_at:  new Date().toISOString(),
+      })
+      .eq('id', approvalId);
+
+    if (updateErr) throw updateErr;
 
     // Audit ledger: immutable record of operational approval
     await writeAuditEntry(organizationId, {
@@ -2468,113 +2497,63 @@ export const approveZohoSync = async (
         }
       }
 
-      // When Zoho is not connected, update local inventory directly (legacy / offline path).
-      if (!zohoConnected) {
-        const itemRef = doc(firestore, 'organizations', organizationId, 'inventory', itemId);
-        const itemSnap = await getDoc(itemRef);
-
-        if (itemSnap.exists()) {
-          const currentStock = itemSnap.data().stock || 0;
-          const newStock = (requestedChange.newQuantity !== undefined)
-            ? Math.max(0, requestedChange.newQuantity)
-            : Math.max(0, currentStock + requestedChange.quantityDelta);
-
-          await updateDoc(itemRef, {
-            stock: newStock,
-            lastUpdated: serverTimestamp(),
-            lastUpdatedBy: {
-              uid: approverUid,
-              email: approverEmail,
-              name: approverName
-            }
-          });
-
-          console.log(`📦 Local inventory updated (offline): ${itemName} (${currentStock} → ${newStock})`);
-
-          // POS write-back — non-blocking.
-          const itemPosId = itemSnap.data().posId as string | undefined;
-          if (itemPosId) {
-            try {
-              const { PosService } = await import('./posService');
-              await PosService.adjustInventory(
-                organizationId,
-                itemPosId,
-                newStock,
-                `Approved stock request: ${requestedChange?.reason || 'Stock approval'}`
-              );
-              console.log(`✅ POS synced after approval: ${itemName} → ${newStock}`);
-            } catch (posError: any) {
-              console.warn('⚠️ POS sync failed after approval (non-blocking):', posError.message);
-            }
-          }
+      // When Zoho is not connected, update local inventory in Supabase directly.
+      if (!zohoConnected && itemId) {
+        const { data: invRow } = await supabase
+          .from('inventory_items').select('quantity').eq('id', itemId).maybeSingle();
+        if (invRow) {
+          const newStock = Math.max(0, (invRow.quantity ?? 0) + quantityDelta);
+          await supabase.from('inventory_items')
+            .update({ quantity: newStock, updated_at: new Date().toISOString() })
+            .eq('id', itemId);
+          console.log(`📦 Inventory updated (offline): ${itemName} → ${newStock}`);
         }
       }
-      // When Zoho IS connected, local stock is intentionally NOT updated here.
-      // Quantities are pulled from Zoho after the draft is approved in Zoho Books.
+      // When Zoho IS connected, quantities are pulled from Zoho after the
+      // draft is approved in Zoho Books — local stock is not touched here.
     }
-    
-    // Create activity log for the approval
-    const activityRef = collection(firestore, 'organizations', organizationId, 'activityLogs');
-    await addDoc(activityRef, {
-      organizationId,
-      user: approverEmail,
-      userName: approverName,
-      action: 'Approved Stock Request',
+
+    // ── Activity log ──────────────────────────────────────────────────────
+    await supabase.from('activity_logs').insert({
+      org_id:      organizationId,
+      type:        'approval',
+      entity_type: 'inventory',
+      entity_id:   itemId ?? null,
+      actor_id:    approverUid,
       details: {
+        event:         'approved',
         approvalId,
-        itemId,
         itemName,
-        requestedBy: requestedByName || requestedBy,
-        quantityChange: requestedChange?.quantityDelta || 0,
-        newQuantity: requestedChange?.newQuantity || 0,
-        reason: requestedChange?.reason || 'Stock approval',
-        source: approval.source || 'unknown'
+        quantityDelta,
+        reason:        approval.reason,
+        approverName,
+        approvalComment: approvalComment.trim() || null,
       },
-      timestamp: serverTimestamp(),
-      category: 'INVENTORY'
     });
-    
-    // Send notification to ALL users (broadcast to dashboard)
-    const notificationRef = collection(firestore, 'organizations', organizationId, 'notifications');
-    await addDoc(notificationRef, {
-      type: 'approval_completed',
-      title: '✅ Stock Request Approved',
-      message: `${approverName} approved ${requestedByName || 'a user'}'s request for ${itemName} (${requestedChange?.quantityDelta > 0 ? '+' : ''}${requestedChange?.quantityDelta || 0} units)`,
-      targetUserId: 'ALL',
-      priority: 'normal',
-      createdAt: serverTimestamp(),
-      readBy: [],
-      metadata: {
-        approvalId,
-        itemId,
-        itemName,
-        approvedBy: approverName,
-        requestedBy: requestedByName || requestedBy,
-        action: 'approved',
-        source: 'dashboard'
-      }
-    });
-    
-    // Send notification to the original requester (mobile user)
-    await addDoc(notificationRef, {
-      type: 'your_request_approved',
-      title: '🎉 Your Stock Request Was Approved!',
-      message: `${approverName} approved your ${itemName} stock request (${requestedChange?.quantityDelta > 0 ? '+' : ''}${requestedChange?.quantityDelta || 0} units)`,
-      targetUserId: requestedBy,
-      priority: 'high',
-      createdAt: serverTimestamp(),
-      readBy: [],
-      metadata: {
-        approvalId,
-        itemId,
-        itemName,
-        approvedBy: approverName,
-        action: 'approved',
-        source: 'dashboard'
-      }
-    });
-    
-    console.log('📬 Notifications sent for approval');
+
+    // ── Notifications ─────────────────────────────────────────────────────
+    const sign = quantityDelta > 0 ? '+' : '';
+    await supabase.from('notifications').insert([
+      {
+        org_id:  organizationId,
+        title:   '✅ Stock Request Approved',
+        body:    `${approverName} approved a request for ${itemName} (${sign}${quantityDelta} units)`,
+        type:    'approval_completed',
+        data:    { approvalId, itemId, itemName, approverName, action: 'approved' },
+        is_read: false,
+      },
+      {
+        org_id:   organizationId,
+        user_id:  requestedBy ?? null,
+        title:    '🎉 Your Stock Request Was Approved!',
+        body:     `${approverName} approved your ${itemName} request (${sign}${quantityDelta} units)`,
+        type:     'your_request_approved',
+        data:     { approvalId, itemId, itemName, approverName, action: 'approved' },
+        is_read:  false,
+      },
+    ]);
+
+    console.log('✅ Approval complete, notifications sent');
   } catch (error) {
     console.error('Error approving request:', error);
     throw new Error('Failed to approve request');
@@ -2625,113 +2604,72 @@ export const rejectZohoSync = async (
   reason: string
 ): Promise<void> => {
   try {
-    // Get rejecter name
-    const userDoc = await getDoc(doc(firestore, 'organizations', organizationId, 'users', rejecterUid));
-    const rejecterName = userDoc.exists() ? userDoc.data()?.name : 'Unknown Admin';
-    const rejecterEmail = userDoc.exists() ? userDoc.data()?.email : 'admin@unknown.com';
-    
-    // Get the approval request details
-    const approvalRef = doc(firestore, 'organizations', organizationId, 'approvals', approvalId);
-    const approvalSnap = await getDoc(approvalRef);
-    
-    if (!approvalSnap.exists()) {
-      throw new Error('Approval request not found');
-    }
-    
-    const approval = approvalSnap.data();
-    const { itemId, itemName, requestedBy, requestedByName, requestedChange } = approval;
-    
-    // Update the approval status
-    await updateDoc(approvalRef, {
-      status: 'rejected',
-      rejectedBy: rejecterUid,
-      rejectedByName: rejecterName,
-      rejectedAt: serverTimestamp(),
-      rejectionReason: reason,
-      processed: true
-    });
-    
+    // ── Get rejecter info ─────────────────────────────────────────────────
+    const { data: rejecterRow } = await supabase
+      .from('users').select('full_name, email').eq('id', rejecterUid).maybeSingle();
+    const rejecterName = rejecterRow?.full_name ?? rejecterRow?.email ?? 'Unknown Admin';
+
+    // ── Get the approval request ───────────────────────────────────────────
+    const { data: approval, error: fetchErr } = await supabase
+      .from('approval_requests')
+      .select(`*, inventory_items ( id, name, sku )`)
+      .eq('id', approvalId)
+      .maybeSingle();
+
+    if (fetchErr || !approval) throw new Error('Approval request not found');
+
+    const itemId   = approval.item_id;
+    const itemName = approval.inventory_items?.name ?? 'Unknown Item';
+    const requestedBy = approval.requested_by;
+
+    // ── Update status ──────────────────────────────────────────────────────
+    const { error: updateErr } = await supabase
+      .from('approval_requests')
+      .update({ status: 'rejected', updated_at: new Date().toISOString() })
+      .eq('id', approvalId);
+
+    if (updateErr) throw updateErr;
+
     console.log('✅ Approval request rejected:', approvalId);
 
-    // Audit ledger: immutable record of the rejection
-    await writeAuditEntry(organizationId, {
-      event: 'rejected',
-      actor: rejecterUid,
-      actorName: rejecterName,
-      approvalId,
-      sessionId: approval.stockTakeSessionId,
-      itemId: approval.itemId,
-      itemName: approval.itemName,
-      itemSKU: approval.itemSKU,
-      quantityDelta: approval.requestedChange?.quantityDelta,
-      expectedQuantity: approval.requestedChange?.expectedQuantity,
-      unitCost: approval.requestedChange?.unitCost,
-      valueImpact: (approval.requestedChange?.quantityDelta ?? 0) * (approval.requestedChange?.unitCost ?? 0),
-      rejectionReason: reason
+    // ── Activity log ──────────────────────────────────────────────────────
+    await supabase.from('activity_logs').insert({
+      org_id:      organizationId,
+      type:        'approval',
+      entity_type: 'inventory',
+      entity_id:   itemId ?? null,
+      actor_id:    rejecterUid,
+      details: {
+        event:         'rejected',
+        approvalId,
+        itemName,
+        quantityDelta: approval.delta,
+        rejectionReason: reason,
+        rejecterName,
+      },
     });
 
-    // Create activity log for the rejection
-    const activityRef = collection(firestore, 'organizations', organizationId, 'activityLogs');
-    await addDoc(activityRef, {
-      organizationId,
-      user: rejecterEmail,
-      userName: rejecterName,
-      action: 'Rejected Stock Request',
-      details: {
-        approvalId,
-        itemId,
-        itemName,
-        requestedBy: requestedByName || requestedBy,
-        quantityChange: requestedChange?.quantityDelta || 0,
-        rejectionReason: reason,
-        source: approval.source || 'unknown'
+    // ── Notifications ─────────────────────────────────────────────────────
+    await supabase.from('notifications').insert([
+      {
+        org_id:  organizationId,
+        title:   '❌ Stock Request Rejected',
+        body:    `${rejecterName} rejected a request for ${itemName}. Reason: ${reason}`,
+        type:    'approval_rejected',
+        data:    { approvalId, itemId, itemName, rejecterName, reason, action: 'rejected' },
+        is_read: false,
       },
-      timestamp: serverTimestamp(),
-      category: 'INVENTORY'
-    });
-    
-    // Send notification to ALL users (broadcast to dashboard)
-    const notificationRef = collection(firestore, 'organizations', organizationId, 'notifications');
-    await addDoc(notificationRef, {
-      type: 'approval_rejected',
-      title: '❌ Stock Request Rejected',
-      message: `${rejecterName} rejected ${requestedByName || 'a user'}'s request for ${itemName}. Reason: ${reason}`,
-      targetUserId: 'ALL',
-      priority: 'normal',
-      createdAt: serverTimestamp(),
-      readBy: [],
-      metadata: {
-        approvalId,
-        itemId,
-        itemName,
-        rejectedBy: rejecterName,
-        requestedBy: requestedByName || requestedBy,
-        reason,
-        action: 'rejected',
-        source: 'dashboard'
-      }
-    });
-    
-    // Send notification to the original requester (mobile user)
-    await addDoc(notificationRef, {
-      type: 'your_request_rejected',
-      title: '⚠️ Your Stock Request Was Rejected',
-      message: `${rejecterName} rejected your ${itemName} stock request. Reason: ${reason}`,
-      targetUserId: requestedBy,
-      priority: 'high',
-      createdAt: serverTimestamp(),
-      readBy: [],
-      metadata: {
-        approvalId,
-        itemId,
-        itemName,
-        rejectedBy: rejecterName,
-        reason,
-        action: 'rejected',
-        source: 'dashboard'
-      }
-    });
-    
+      {
+        org_id:   organizationId,
+        user_id:  requestedBy ?? null,
+        title:    '⚠️ Your Stock Request Was Rejected',
+        body:     `${rejecterName} rejected your ${itemName} request. Reason: ${reason}`,
+        type:     'your_request_rejected',
+        data:     { approvalId, itemId, itemName, rejecterName, reason, action: 'rejected' },
+        is_read:  false,
+      },
+    ]);
+
     console.log('📬 Notifications sent for rejection');
   } catch (error) {
     console.error('Error rejecting request:', error);
